@@ -1,0 +1,1121 @@
+// LiquidAssFix: add-on for the stock dylv.liquidass 0.1.1b on iOS 17 (arm64e), loaded into SpringBoard.
+// Runtime style on purpose: no @"" literals and no @implementation, because the on-device clang
+// does not sign their isa and arm64e hosts die in objc_msgSend (see HIPChargeModule.m).
+//
+// Parts:
+//  - layoutSubviews hook slots with replaceable handlers (a newer build loaded later through the
+//    dev loader takes the handlers over, so fixes can be iterated without a respring)
+//  - volume HUD glass for iOS 17's SBElasticSliderView (stock hooks a class that no longer exists)
+//  - a plain status log (OUTDIR/fix.log); no screen captures, no view dumps
+//
+// Kill switch: create /var/jb/usr/lib/LiquidAssFix/disabled
+
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+#include <notify.h>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <string.h>
+#include <dlfcn.h>
+#include <time.h>
+#include <unistd.h>
+
+#define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
+#define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
+#define BUILD_TAG "v49"
+#define MAX_SLOTS 12
+#define MAX_HANDLERS 24
+
+#define S(cstr) [NSString stringWithUTF8String:(cstr)]
+// Association keys must be the same in every loaded build: a selector is unique per process, a static's address is not
+#define KEY(name) ((const void *)sel_registerName(name))
+
+typedef void (*LGFixHandler)(id object);
+
+#pragma mark - log
+
+static void flog(const char *fmt, ...) {
+	FILE *f = fopen(OUTDIR "/fix.log", "a");
+	if (!f) return;
+	va_list ap;
+	va_start(ap, fmt);
+	fprintf(f, "%.2f [" BUILD_TAG "] ", CFAbsoluteTimeGetCurrent());
+	vfprintf(f, fmt, ap);
+	fputc('\n', f);
+	va_end(ap);
+	fclose(f);
+}
+
+#pragma mark - handler registry (owned by the first loaded build)
+
+struct handlerEntry { char name[40]; LGFixHandler fn; };
+static struct handlerEntry sHandlers[MAX_HANDLERS];
+
+__attribute__((visibility("default"))) void lgfix_register(const char *name, LGFixHandler fn) {
+	for (int i = 0; i < MAX_HANDLERS; i++) {
+		if (!sHandlers[i].name[0] || !strcmp(sHandlers[i].name, name)) {
+			strlcpy(sHandlers[i].name, name, sizeof(sHandlers[i].name));
+			sHandlers[i].fn = fn;
+			return;
+		}
+	}
+}
+
+static LGFixHandler handlerNamed(const char *name) {
+	for (int i = 0; i < MAX_HANDLERS && sHandlers[i].name[0]; i++)
+		if (!strcmp(sHandlers[i].name, name)) return sHandlers[i].fn;
+	return NULL;
+}
+
+static void callHandler(const char *name, id object) {
+	LGFixHandler fn = handlerNamed(name);
+	if (!fn) return;
+	@try {
+		fn(object);
+	} @catch (id e) {
+		flog("handler %s threw", name);
+	}
+}
+
+#pragma mark - layoutSubviews hook slots
+
+struct hookSlot {
+	Class cls;
+	IMP orig;          // set when the class had its own layoutSubviews
+	char handler[40];
+	BOOL busy;
+};
+static struct hookSlot sSlots[MAX_SLOTS];
+
+static void slotCall(int index, id self, SEL _cmd) {
+	struct hookSlot *slot = &sSlots[index];
+	if (slot->orig) {
+		((void (*)(id, SEL))slot->orig)(self, _cmd);
+	} else {
+		struct objc_super sup = { self, class_getSuperclass(slot->cls) };
+		((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, _cmd);
+	}
+	if (slot->busy) return;
+	slot->busy = YES;
+	callHandler(slot->handler, self);
+	slot->busy = NO;
+}
+
+#define SLOT(n) static void slot##n(id self, SEL _cmd) { slotCall(n, self, _cmd); }
+SLOT(0) SLOT(1) SLOT(2) SLOT(3) SLOT(4) SLOT(5) SLOT(6) SLOT(7) SLOT(8) SLOT(9) SLOT(10) SLOT(11)
+// Filled at run time: a static initializer of function pointers is not signed correctly by the on-device toolchain
+static IMP sSlotImps[MAX_SLOTS];
+static void fillSlotImps(void) {
+	if (sSlotImps[0]) return;
+	sSlotImps[0] = (IMP)slot0; sSlotImps[1] = (IMP)slot1; sSlotImps[2] = (IMP)slot2; sSlotImps[3] = (IMP)slot3;
+	sSlotImps[4] = (IMP)slot4; sSlotImps[5] = (IMP)slot5; sSlotImps[6] = (IMP)slot6; sSlotImps[7] = (IMP)slot7;
+	sSlotImps[8] = (IMP)slot8; sSlotImps[9] = (IMP)slot9; sSlotImps[10] = (IMP)slot10; sSlotImps[11] = (IMP)slot11;
+}
+
+// Run handler `handlerName` after every -layoutSubviews of `className`. Returns 1 when hooked.
+__attribute__((visibility("default"))) int lgfix_hook_layout(const char *className, const char *handlerName) {
+	Class cls = objc_getClass(className);
+	if (!cls) return 0;
+	fillSlotImps();
+	for (int i = 0; i < MAX_SLOTS; i++) {
+		if (sSlots[i].cls == cls) {
+			strlcpy(sSlots[i].handler, handlerName, sizeof(sSlots[i].handler));
+			return 1;
+		}
+		if (sSlots[i].cls) continue;
+		SEL sel = @selector(layoutSubviews);
+		sSlots[i].cls = cls;
+		strlcpy(sSlots[i].handler, handlerName, sizeof(sSlots[i].handler));
+		if (!class_addMethod(cls, sel, sSlotImps[i], "v@:")) {
+			unsigned int count = 0;
+			Method *methods = class_copyMethodList(cls, &count);
+			for (unsigned int m = 0; m < count; m++) {
+				if (method_getName(methods[m]) == sel) {
+					sSlots[i].orig = method_setImplementation(methods[m], sSlotImps[i]);
+					break;
+				}
+			}
+			free(methods);
+			if (!sSlots[i].orig) {
+				sSlots[i].cls = Nil;
+				return 0;
+			}
+		}
+		return 1;
+	}
+	return 0;
+}
+
+#pragma mark - liquidass.dylib API
+
+static id (*pCreateGlass)(CGRect, id, id);
+static void (*pTrackGlass)(id, id, id);
+static BOOL (*pHostEnabled)(id);
+
+static BOOL resolveLiquidAss(void) {
+	if (pCreateGlass && pHostEnabled) return YES;
+	pCreateGlass = dlsym(RTLD_DEFAULT, "LGCreateRegisteredGlass");
+	pTrackGlass = dlsym(RTLD_DEFAULT, "lgTrackGlass");
+	pHostEnabled = dlsym(RTLD_DEFAULT, "lgHostEnabled");
+	return pCreateGlass && pHostEnabled;
+}
+
+static id ivarObject(id object, const char *name) {
+	if (!object) return nil;
+	Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+	if (!ivar) return nil;
+	const char *type = ivar_getTypeEncoding(ivar);
+	if (!type || type[0] != '@') return nil;
+	return object_getIvar(object, ivar);
+}
+
+static void setContinuousCorners(CALayer *layer, CGFloat radius) {
+	[layer setCornerRadius:radius];
+	[layer setCornerCurve:kCACornerCurveContinuous];
+}
+
+#pragma mark - volume HUD (SBElasticSliderView, iOS 17)
+
+static const char *cname(id obj);
+static BOOL isNewestBuild(void);
+static void widgetFillUpdate(id object);
+static void widgetListUpdate(id object);
+static void widgetFillWalk(UIView *view, Class cls, int depth);
+
+static void volumeUpdate(id object) {
+	UIView *slider = object;
+	if (!resolveLiquidAss()) return;
+	UIView *base = ivarObject(slider, "_baseMaterialView");
+	UIView *capture = ivarObject(slider, "_captureOnlyMaterialView");
+	UIView *shadow = ivarObject(slider, "_shadowView");
+	UIView *glass = objc_getAssociatedObject(slider, KEY("lgfix_kVolumeGlassKey"));
+	UIView *vibrance = objc_getAssociatedObject(slider, KEY("lgfix_kVolumeVibranceKey"));
+
+	// The thin bar states (7 and 14 pt wide) are narrower than any glass bezel: the refraction has nothing to
+	// sample and renders black. Use the stock material there.
+	UIView *narrowBase = base;
+	BOOL narrow = narrowBase && [narrowBase frame].size.width < 30.0 && access(CTLDIR "/glass-thin-bar", F_OK) != 0;
+	if (narrow || !pHostEnabled(S("VolumeHUD"))) {
+		[glass setHidden:YES];
+		[vibrance setHidden:YES];
+		[base setHidden:NO];
+		[capture setHidden:NO];
+		[shadow setHidden:NO];
+		[(UIView *)ivarObject(slider, "_backgroundView") setAlpha:1.0];
+		return;
+	}
+	UIView *host = [base superview];
+	if (!base || !host) return;
+	CGRect frame = [base frame];
+	if (frame.size.width < 2.0 || frame.size.height < 2.0) return;
+
+	[base setHidden:YES];
+	[capture setHidden:YES];
+	[shadow setHidden:YES];
+
+	if (!glass) {
+		glass = pCreateGlass(frame, nil, S("VolumeHUD"));
+		if (!glass) return;
+		[glass setUserInteractionEnabled:NO];
+		objc_setAssociatedObject(slider, KEY("lgfix_kVolumeGlassKey"), glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		if (pTrackGlass) pTrackGlass(glass, S("VolumeHUD"), slider);
+		flog("volume: glass created for %s host=%s frame=%.0fx%.0f", class_getName(object_getClass(slider)),
+		     class_getName(object_getClass(host)), frame.size.width, frame.size.height);
+	}
+	if (!vibrance) {
+		Class cls = objc_getClass("LGVolumeHUDVibranceView");
+		if (cls) vibrance = [[cls alloc] initWithFrame:frame];
+		if (vibrance)
+			objc_setAssociatedObject(slider, KEY("lgfix_kVolumeVibranceKey"), vibrance, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	// Glass left behind by other builds or the stock tweak in the same host
+	Class glassClass = objc_getClass("LGLiveBackdropView"), vibranceClass = objc_getClass("LGVolumeHUDVibranceView");
+	for (UIView *sub in [[host subviews] copy]) {
+		if (sub == glass || sub == vibrance) continue;
+		if ((glassClass && [sub isKindOfClass:glassClass]) || (vibranceClass && [sub isKindOfClass:vibranceClass]))
+			[sub removeFromSuperview];
+	}
+	if ([glass superview] != host) [host insertSubview:glass aboveSubview:base];
+	if (vibrance && [vibrance superview] != host) [host insertSubview:vibrance aboveSubview:glass];
+
+	// Pill shape like the stock tweak on older iOS. The slider derives every radius from this fraction.
+	SEL fractionSel = sel_registerName("cornerRadiusMinorAxisFraction");
+	SEL setFractionSel = sel_registerName("setCornerRadiusMinorAxisFraction:");
+	if ([slider respondsToSelector:fractionSel] && [slider respondsToSelector:setFractionSel] &&
+	    fabs(((double (*)(id, SEL))objc_msgSend)(slider, fractionSel) - 0.5) > 0.001) {
+		((void (*)(id, SEL, double))objc_msgSend)(slider, setFractionSel, 0.5);
+		SEL updateSel = sel_registerName("_updateCornerRadius");
+		if ([slider respondsToSelector:updateSel]) ((void (*)(id, SEL))objc_msgSend)(slider, updateSel);
+	}
+	CGFloat radius = MIN(frame.size.width, frame.size.height) * 0.5;
+	// The slider's own track material (colorMatrix backdrop) darkens the glass under the unfilled part
+	UIView *track = ivarObject(slider, "_backgroundView");
+	BOOL clearTrack = access(CTLDIR "/keep-track", F_OK) != 0;
+	if (track && fabs([track alpha] - (clearTrack ? 0.0 : 1.0)) > 0.01) [track setAlpha:clearTrack ? 0.0 : 1.0];
+	if ([[host layer] masksToBounds]) setContinuousCorners([host layer], radius);
+	CGSize oldSize = [glass bounds].size;
+	BOOL resized = fabs(oldSize.width - frame.size.width) > 0.5 || fabs(oldSize.height - frame.size.height) > 0.5;
+	[glass setHidden:NO];
+	if (resized || !CGRectEqualToRect([glass frame], frame)) [glass setFrame:frame];
+	setContinuousCorners([glass layer], radius);
+	[[glass layer] setMasksToBounds:YES];
+	if (resized && [glass respondsToSelector:@selector(applyFilters)])
+		((void (*)(id, SEL))objc_msgSend)(glass, @selector(applyFilters));
+	// Stock derives the capture scale from Global.Quality (0.1 here -> about 0.34 for the HUD, visibly soft).
+	// The HUD is tiny, so always capture it at the top scale the tweak uses (0.75), like on a default-quality install.
+	if (access(CTLDIR "/no-hud-scale", F_OK) != 0) {
+		@try {
+			id current = [[glass layer] valueForKey:S("scale")];
+			if (![current respondsToSelector:@selector(doubleValue)] || fabs([current doubleValue] - 0.75) > 0.01)
+				[[glass layer] setValue:[NSNumber numberWithDouble:0.75] forKey:S("scale")];
+		} @catch (id e) {}
+	}
+	if (vibrance) {
+		[vibrance setHidden:NO];
+		if (!CGRectEqualToRect([vibrance frame], frame)) [vibrance setFrame:frame];
+		setContinuousCorners([vibrance layer], radius);
+		[[vibrance layer] setMasksToBounds:YES];
+	}
+}
+
+#pragma mark - expanded Control Center module that is one big slider (WhitePointModule)
+
+// Stock gives the expanded module container a glass with the module radius and the slider inside it a
+// pill glass: two outlines at once. Keep the slider's pill, hide the container's glass while that holds.
+
+static UIView *directSubviewOfClass(UIView *view, const char *className) {
+	Class cls = objc_getClass(className);
+	if (!cls) return nil;
+	for (UIView *sub in [view subviews])
+		if ([sub isKindOfClass:cls]) return sub;
+	return nil;
+}
+
+static UIView *findSlider(UIView *view, int depth) {
+	Class cls = objc_getClass("CCUIContinuousSliderView");
+	if (!cls || depth > 4) return nil;
+	for (UIView *sub in [view subviews]) {
+		if ([sub isKindOfClass:cls]) return sub;
+		UIView *found = findSlider(sub, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
+static void ccContainerUpdate(id object) {
+	UIView *container = object;
+	UIView *glass = directSubviewOfClass(container, "LGLiveBackdropView");
+	if (!glass) return;
+	CGSize size = [container bounds].size;
+	BOOL wholeSlider = NO;
+	if (size.height > 220.0 && size.width > 60.0) {
+		UIView *slider = findSlider(container, 0);
+		if (slider && ![slider isHidden]) {
+			CGSize s = [slider bounds].size;
+			wholeSlider = fabs(s.width - size.width) < 16.0 && fabs(s.height - size.height) < 16.0;
+		}
+	}
+	BOOL hiddenByMe = objc_getAssociatedObject(container, KEY("lgfix_kContainerGlassHiddenKey")) != nil;
+	if (wholeSlider) {
+		if (![glass isHidden]) [glass setHidden:YES];
+		if (!hiddenByMe) {
+			objc_setAssociatedObject(container, KEY("lgfix_kContainerGlassHiddenKey"), glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			flog("cc: container glass hidden for whole-module slider %.0fx%.0f", size.width, size.height);
+		}
+	} else if (hiddenByMe) {
+		[glass setHidden:NO];
+		objc_setAssociatedObject(container, KEY("lgfix_kContainerGlassHiddenKey"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+}
+
+static void ccSliderUpdate(id object) {
+	Class cls = objc_getClass("CCUIContentModuleContentContainerView");
+	if (!cls) return;
+	int level = 0;
+	for (UIView *v = [(UIView *)object superview]; v && level < 4; v = [v superview], level++) {
+		if ([v isKindOfClass:cls]) {
+			ccContainerUpdate(v);
+			return;
+		}
+	}
+}
+
+#pragma mark - Dynamic Island as the "pill HUD" (ringer / silent mode etc. on island phones)
+
+// Phones with a Dynamic Island never show SBRingerPillView / PLPillView: those alerts expand the island.
+// The island is a black blob (a black fill view in a blur+threshold "gooey" container, plus the curtain
+// over the camera cutout). While it is expanded beyond the cutout, hide the black fill and put a
+// PillHUD glass into the island's container. The cutout itself stays black (it is hardware).
+static __weak UIView *sIslandGooeyView;
+static __weak UIView *sIslandContainer;
+
+static BOOL layerHasFilterNamed(CALayer *layer, const char *wanted) {
+	for (id filter in [layer filters]) {
+		id name = nil;
+		@try { name = [filter valueForKey:S("name")]; } @catch (id e) {}
+		if (name && !strcmp([[name description] UTF8String], wanted)) return YES;
+	}
+	return NO;
+}
+
+static UIView *findGooeyView(UIView *view, int depth) {
+	if (!view || depth > 5) return nil;
+	if (layerHasFilterNamed([view layer], "alphaThreshold")) return view;
+	for (UIView *sub in [view subviews]) {
+		UIView *found = findGooeyView(sub, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
+static UIView *findViewOfClass(UIView *view, Class cls, int depth) {
+	if (!view || depth > 6) return nil;
+	if ([view isKindOfClass:cls]) return view;
+	for (UIView *sub in [view subviews]) {
+		UIView *found = findViewOfClass(sub, cls, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
+static BOOL isOpaqueBlack(UIView *view) {
+	CGColorRef bg = [[view layer] backgroundColor];
+	if (!bg || CGColorGetAlpha(bg) < 0.9) return NO;
+	const CGFloat *c = CGColorGetComponents(bg);
+	size_t n = CGColorGetNumberOfComponents(bg);
+	for (size_t i = 0; i + 1 < n; i++)
+		if (c[i] > 0.05) return NO;
+	return YES;
+}
+
+// Hidden with an empty mask layer: the system animates alpha / hidden of these views during transitions,
+// it never touches their mask.
+static void islandSetFill(UIView *fill, BOOL hidden, BOOL requireBlack) {
+	if (!fill) return;
+	// alpha set by builds before v26
+	if (objc_getAssociatedObject(fill, KEY("lgfix_kIslandFillHiddenKey"))) {
+		[fill setAlpha:1.0];
+		objc_setAssociatedObject(fill, KEY("lgfix_kIslandFillHiddenKey"), nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+	CALayer *mine = objc_getAssociatedObject(fill, KEY("lgfix_islandMask"));
+	if (hidden) {
+		if (mine || [[fill layer] mask] || (requireBlack && !isOpaqueBlack(fill))) return;
+		CALayer *empty = [CALayer layer];
+		[[fill layer] setMask:empty];
+		objc_setAssociatedObject(fill, KEY("lgfix_islandMask"), empty, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		flog("island: %s masked %.0fx%.0f", cname(fill), [fill bounds].size.width, [fill bounds].size.height);
+	} else if (mine) {
+		if ([[fill layer] mask] == mine) [[fill layer] setMask:nil];
+		objc_setAssociatedObject(fill, KEY("lgfix_islandMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+}
+
+// Gain map views (CAGainMapLayer) act on the display's brightness and do not show in screen captures.
+// A mask alone left a dark outline on the real display, so they also get alpha 0 (re-applied on every
+// layout, the system may animate it back).
+static void islandSetGainHidden(UIView *view, BOOL hidden) {
+	if (!view) return;
+	islandSetFill(view, hidden, NO);
+	// Collapses the gain map layers themselves; unlike alpha, nothing in the system animates this
+	BOOL collapsed = objc_getAssociatedObject(view, KEY("lgfix_islandGainCollapsed")) != nil;
+	if (hidden && !collapsed) {
+		[[view layer] setSublayerTransform:CATransform3DMakeScale(0.0001, 0.0001, 1.0)];
+		objc_setAssociatedObject(view, KEY("lgfix_islandGainCollapsed"), view, OBJC_ASSOCIATION_ASSIGN);
+	} else if (!hidden && collapsed) {
+		[[view layer] setSublayerTransform:CATransform3DIdentity];
+		objc_setAssociatedObject(view, KEY("lgfix_islandGainCollapsed"), nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+	BOOL mine = objc_getAssociatedObject(view, KEY("lgfix_islandGainAlpha")) != nil;
+	if (hidden) {
+		if ([view alpha] > 0.01) {
+			[view setAlpha:0.0];
+			objc_setAssociatedObject(view, KEY("lgfix_islandGainAlpha"), view, OBJC_ASSOCIATION_ASSIGN);
+		}
+	} else if (mine) {
+		[view setAlpha:1.0];
+		objc_setAssociatedObject(view, KEY("lgfix_islandGainAlpha"), nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+}
+
+static void islandSetGainMapsHidden(UIView *view, Class gainClass, Class curtainClass, BOOL hidden, int depth) {
+	if (!view || depth > 5 || [view isKindOfClass:curtainClass]) return;
+	if ([view isKindOfClass:gainClass]) {
+		islandSetGainHidden(view, hidden);
+		return;
+	}
+	for (UIView *sub in [view subviews]) islandSetGainMapsHidden(sub, gainClass, curtainClass, hidden, depth + 1);
+}
+
+// The island's black body on 17.3: opaque black views in the siblings of the cutout curtain
+// (_SBSystemApertureMagiciansCurtainView) and the body's gain map view (CAGainMapLayer, draws black).
+// The curtain itself stays, it covers the hardware cutout.
+static void islandSetFillsHidden(UIView *window, BOOL hidden) {
+	UIView *curtain = sIslandGooeyView;
+	Class curtainClass = objc_getClass("_SBSystemApertureMagiciansCurtainView");
+	Class gainClass = objc_getClass("_SBSystemApertureGainMapView");
+	if (!curtainClass) return;
+	if (!curtain || [curtain window] != window) sIslandGooeyView = curtain = findViewOfClass(window, curtainClass, 0);
+	for (UIView *blob in [[curtain superview] subviews]) {
+		if (blob == curtain) continue;
+		for (UIView *fill in [blob subviews]) islandSetFill(fill, hidden, YES);
+	}
+	if (gainClass) islandSetGainMapsHidden(window, gainClass, curtainClass, hidden, 0);
+}
+
+// Views of the container itself that draw black: the fill that enables the blob effect (shown during
+// transitions) and the container's gain map
+static void islandSetContainerFillsHidden(UIView *container, BOOL hidden) {
+	if (access(CTLDIR "/keep-blob-fill", F_OK) != 0)
+		islandSetFill(ivarObject(container, "_blobEnablingBlackFillView"), hidden, NO);
+	islandSetGainHidden(ivarObject(container, "_gainMapView"), hidden);
+	// The transition shadow lies above the glass: on the stock island its inside is covered by the black
+	// body, on glass it darkens the whole island for as long as the size animates
+	if (access(CTLDIR "/keep-shadow", F_OK) != 0) islandSetFill(ivarObject(container, "_shadowView"), hidden, NO);
+	// Key lines: rounded rects 1.7 pt larger than the island (a darkening backdrop and a plus-lighter fill).
+	// The black body normally covers all but that outer ring; on glass the ring reads as a black border.
+	if (access(CTLDIR "/keep-keyline", F_OK) != 0) {
+		islandSetFill(ivarObject(container, "_lightBkgKeyLineView"), hidden, NO);
+		islandSetFill(ivarObject(container, "_darkBkgKeyLineView"), hidden, NO);
+	}
+}
+
+// System indicators (flashlight, ringer, ...) are CAPackages drawn on an opaque black square, invisible on the
+// stock black island and a black box on glass. A color matrix on the portal that shows them turns brightness
+// into alpha (black -> transparent, light stays). Only for package-based views: artwork etc. is left alone.
+static BOOL viewTreeHasClass(UIView *view, Class cls, int depth) {
+	if (!view || depth > 4) return NO;
+	if ([view isKindOfClass:cls]) return YES;
+	for (UIView *sub in [view subviews])
+		if (viewTreeHasClass(sub, cls, depth + 1)) return YES;
+	return NO;
+}
+
+static id blackKeyFilter(void) {
+	Class filterClass = objc_getClass("CAFilter");
+	SEL make = sel_registerName("filterWithType:");
+	if (!filterClass || !class_getClassMethod(filterClass, make)) return nil;
+	id filter = ((id (*)(id, SEL, id))objc_msgSend)((id)filterClass, make, S("colorMatrix"));
+	// rows R, G, B, A; columns r, g, b, a, bias. Alpha = r + g + b: black turns transparent, anything with
+	// a third of full brightness or a saturated color stays opaque.
+	float m[20] = { 1, 0, 0, 0, 0,   0, 1, 0, 0, 0,   0, 0, 1, 0, 0,   1, 1, 1, 0, 0 };
+	[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"] forKey:S("inputColorMatrix")];
+	[filter setValue:S("lgfixBlackKey") forKey:S("name")];
+	return filter;
+}
+
+// The view a CAPortalLayer-backed view shows
+static UIView *portalSourceView(UIView *portal) {
+	Class portalLayerClass = objc_getClass("CAPortalLayer");
+	CALayer *layer = [portal layer];
+	SEL sourceSel = sel_registerName("sourceLayer");
+	if (!portalLayerClass || ![layer isKindOfClass:portalLayerClass] || ![layer respondsToSelector:sourceSel]) return nil;
+	CALayer *source = ((id (*)(id, SEL))objc_msgSend)(layer, sourceSel);
+	id delegate = [source delegate];
+	return [delegate isKindOfClass:[UIView class]] ? delegate : nil;
+}
+
+static BOOL layerOpaqueBlack(CALayer *layer) {
+	CGColorRef bg = [layer backgroundColor];
+	if (!bg || CGColorGetAlpha(bg) < 0.9) return NO;
+	const CGFloat *c = CGColorGetComponents(bg);
+	size_t n = CGColorGetNumberOfComponents(bg);
+	for (size_t i = 0; i + 1 < n; i++)
+		if (c[i] > 0.05) return NO;
+	return YES;
+}
+
+// Opaque black layers that span the whole indicator package (its "Root Layer" and state root): the backing
+// the glyph is drawn on. Smaller black layers are part of the glyph and stay.
+static void packageSetBackingCleared(CALayer *layer, CGSize full, BOOL cleared, int depth) {
+	if (!layer || depth > 4) return;
+	CGSize size = [layer bounds].size;
+	BOOL mine = objc_getAssociatedObject(layer, KEY("lgfix_islandBacking")) != nil;
+	if (cleared && !mine && layerOpaqueBlack(layer) && size.width >= full.width * 0.9 && size.height >= full.height * 0.9) {
+		[layer setBackgroundColor:[[UIColor clearColor] CGColor]];
+		objc_setAssociatedObject(layer, KEY("lgfix_islandBacking"), layer, OBJC_ASSOCIATION_ASSIGN);
+		const char *name = [[layer name] UTF8String];
+		flog("island: package backing cleared (%s)", name ? name : "?");
+	} else if (!cleared && mine) {
+		[layer setBackgroundColor:[[UIColor blackColor] CGColor]];
+		objc_setAssociatedObject(layer, KEY("lgfix_islandBacking"), nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+	// sublayers are laid out in the package's own (unscaled) size
+	for (CALayer *sub in [layer sublayers]) packageSetBackingCleared(sub, depth == 0 ? [sub bounds].size : full, cleared, depth + 1);
+}
+
+static void packageViewsSetBackingCleared(UIView *view, Class packageClass, BOOL cleared, int depth) {
+	if (!view || depth > 4) return;
+	if ([view isKindOfClass:packageClass]) {
+		for (CALayer *sub in [[view layer] sublayers]) packageSetBackingCleared(sub, [sub bounds].size, cleared, 0);
+		return;
+	}
+	for (UIView *sub in [view subviews]) packageViewsSetBackingCleared(sub, packageClass, cleared, depth + 1);
+}
+
+static void islandSetPortalKeyed(UIView *transformView, BOOL keyed) {
+	Class packageClass = objc_getClass("_SBUISystemApertureCAPackageView");
+	if (!transformView || !packageClass) return;
+	for (UIView *portal in [transformView subviews]) {
+		BOOL mine = objc_getAssociatedObject(portal, KEY("lgfix_islandKeyed")) != nil;
+		UIView *source = portalSourceView(portal);
+		BOOL want = keyed && viewTreeHasClass(source, packageClass, 0);
+		if (source && (want || !keyed)) packageViewsSetBackingCleared(source, packageClass, want, 0);
+		if (want && !mine && ![[[portal layer] filters] count]) {
+			id filter = blackKeyFilter();
+			if (!filter) return;
+			[[portal layer] setFilters:[NSArray arrayWithObject:filter]];
+			objc_setAssociatedObject(portal, KEY("lgfix_islandKeyed"), portal, OBJC_ASSOCIATION_ASSIGN);
+			flog("island: black keyed out of %s %.0fx%.0f", cname(portal), [portal bounds].size.width, [portal bounds].size.height);
+		} else if (!want && mine) {
+			[[portal layer] setFilters:nil];
+			objc_setAssociatedObject(portal, KEY("lgfix_islandKeyed"), nil, OBJC_ASSOCIATION_ASSIGN);
+		}
+	}
+}
+
+static void islandSetFill(UIView *fill, BOOL hidden, BOOL requireBlack);
+
+// Content of the element shown in the island: its indicator views and the snapshot the system cross-fades
+// from during a size transition (it is taken of the black island)
+static void islandSetElementAdapted(UIView *container, BOOL adapted) {
+	id controller = ivarObject(container, "_elementViewController");
+	if (!controller) return;
+	BOOL keyOut = adapted && access(CTLDIR "/keep-indicator-black", F_OK) != 0;
+	id elementView = ivarObject(controller, "_elementView");
+	islandSetPortalKeyed(ivarObject(elementView, "_leadingTransformView"), keyOut);
+	islandSetPortalKeyed(ivarObject(elementView, "_trailingTransformView"), keyOut);
+	islandSetPortalKeyed(ivarObject(elementView, "_minimalTransformView"), keyOut);
+	if (access(CTLDIR "/keep-snapshot", F_OK) != 0) {
+		islandSetFill(ivarObject(controller, "_snapshotView"), adapted, NO);
+		// Image view next to the element view, centered on the island and clipped to its shape: alpha 1 at the
+		// start of a size transition, fading to 0. On glass it shows as a black blob growing out of the cutout.
+		SEL loadedSel = sel_registerName("isViewLoaded");
+		if ([controller respondsToSelector:loadedSel] && ((BOOL (*)(id, SEL))objc_msgSend)(controller, loadedSel)) {
+			for (UIView *sub in [[(UIViewController *)controller view] subviews])
+				if ([sub isKindOfClass:[UIImageView class]]) islandSetFill(sub, adapted, NO);
+		}
+	}
+}
+
+static void islandElementUpdate(id object) {
+	Class containerClass = objc_getClass("SBSystemApertureContainerView");
+	if (!containerClass) return;
+	int level = 0;
+	for (UIView *v = [(UIView *)object superview]; v && level < 10; v = [v superview], level++) {
+		if (![v isKindOfClass:containerClass]) continue;
+		UIView *glass = objc_getAssociatedObject(v, KEY("lgfix_kIslandGlassKey"));
+		if (glass && ![glass isHidden]) islandSetElementAdapted(v, YES);
+		return;
+	}
+}
+
+static BOOL (*pPrefBool)(id, BOOL);
+static id (*pPrefString)(id, id);
+
+static BOOL islandEnabled(void) {
+	if (access(CTLDIR "/no-island", F_OK) == 0 || !pHostEnabled(S("PillHUD"))) return NO;
+	if (!pPrefBool) pPrefBool = dlsym(RTLD_DEFAULT, "LG_prefBool");
+	return pPrefBool ? pPrefBool(S("DynamicIsland.Enabled"), YES) : YES;
+}
+
+// "#RRGGBBAA" from DynamicIsland.TintColor (alpha scaled down); nil when unset or fully transparent
+static UIColor *islandTintColor(void) {
+	if (!pPrefString) pPrefString = dlsym(RTLD_DEFAULT, "LG_prefString");
+	id value = pPrefString ? pPrefString(S("DynamicIsland.TintColor"), nil) : nil;
+	if (![value isKindOfClass:[NSString class]]) return nil;
+	const char *hex = [value UTF8String];
+	unsigned int r = 0, g = 0, b = 0, a = 255;
+	if (!hex || hex[0] != '#' || sscanf(hex + 1, "%2x%2x%2x%2x", &r, &g, &b, &a) < 3 || a == 0) return nil;
+	// The overlay sits above the glass, so a fully opaque pick (the Settings color picker writes alpha FF)
+	// would cover it completely. Full alpha maps to a 35 % wash.
+	CGFloat strength = access(CTLDIR "/island-tint-opaque", F_OK) == 0 ? 1.0 : 0.35;
+	return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:a / 255.0 * strength];
+}
+
+static void islandUpdate(id object) {
+	UIView *container = object;
+	sIslandContainer = container;
+	UIView *window = [container window];
+	if (!window || !resolveLiquidAss()) return;
+	UIView *glass = objc_getAssociatedObject(container, KEY("lgfix_kIslandGlassKey"));
+	CGSize size = [container bounds].size;
+	// Resting size on this phone is about 125 x 37: only treat a clearly expanded island
+	BOOL expanded = size.width > 150.0 || size.height > 48.0;
+	BOOL enabled = islandEnabled();
+	// Collapsing: the size jumps to the resting size when the animation starts. Stay glass until it has
+	// played out, otherwise the black body is back for the whole animation.
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (enabled && expanded) {
+		objc_setAssociatedObject(container, KEY("lgfix_islandLinger"), [NSNumber numberWithDouble:now + 0.7], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	} else if (enabled && glass && ![glass isHidden] && access(CTLDIR "/no-island-linger", F_OK) != 0) {
+		double until = [objc_getAssociatedObject(container, KEY("lgfix_islandLinger")) doubleValue];
+		// The collapse can run longer than the fixed linger: as long as the island on screen is still larger
+		// than its resting size, the black body would show as a black pill shrinking.
+		CALayer *presentation = [[container layer] presentationLayer];
+		CGSize shown = presentation ? [presentation bounds].size : size;
+		BOOL animating = fabs(shown.width - size.width) > 1.0 || fabs(shown.height - size.height) > 1.0;
+		if (now >= until && animating && now < until + 2.5) until = now + 0.05;
+		if (now < until) {
+			expanded = YES;
+			if (!objc_getAssociatedObject(container, KEY("lgfix_islandLingerTimer"))) {
+				objc_setAssociatedObject(container, KEY("lgfix_islandLingerTimer"), container, OBJC_ASSOCIATION_ASSIGN);
+				__weak UIView *weakContainer = container;
+				dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((until - now + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+					UIView *strong = weakContainer;
+					if (!strong) return;
+					objc_setAssociatedObject(strong, KEY("lgfix_islandLingerTimer"), nil, OBJC_ASSOCIATION_ASSIGN);
+					[strong setNeedsLayout];
+				});
+			}
+		}
+	}
+	UIView *tint = objc_getAssociatedObject(container, KEY("lgfix_islandTint"));
+	if (!enabled || !expanded) {
+		[tint setHidden:YES];
+		if (glass && ![glass isHidden]) {
+			[glass setHidden:YES];
+			CALayer *presentation = [[container layer] presentationLayer];
+			flog("island: stock look restored, model %.0fx%.0f on screen %.0fx%.0f", size.width, size.height,
+			     presentation ? [presentation bounds].size.width : -1.0, presentation ? [presentation bounds].size.height : -1.0);
+			islandSetFillsHidden(window, NO);
+			islandSetContainerFillsHidden(container, NO);
+			islandSetElementAdapted(container, NO);
+		}
+		return;
+	}
+	CGRect frame = [container bounds];
+	if (!glass) {
+		glass = pCreateGlass(frame, nil, S("PillHUD"));
+		if (!glass) return;
+		[glass setUserInteractionEnabled:NO];
+		[glass setAutoresizingMask:UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight];
+		objc_setAssociatedObject(container, KEY("lgfix_kIslandGlassKey"), glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		if (pTrackGlass) pTrackGlass(glass, S("PillHUD"), container);
+		flog("island: glass created %.0fx%.0f", size.width, size.height);
+	}
+	CGFloat radius = [[container layer] cornerRadius];
+	if (radius <= 0.0 || radius > MIN(size.width, size.height) * 0.5) radius = MIN(size.width, size.height) * 0.5;
+	// The renderer draws a directional highlight on the outermost ring of the glass; at the island's size it
+	// shows as a dotted line at the top left. The glass is made a little larger than the island and clipped
+	// to the island's shape by a wrapper view, which cuts that ring off.
+	CGFloat outset = access(CTLDIR "/no-island-outset", F_OK) != 0 ? 4.0 : 0.0;
+	UIView *clip = objc_getAssociatedObject(container, KEY("lgfix_islandClip"));
+	if (!clip) {
+		clip = [[UIView alloc] initWithFrame:frame];
+		[clip setUserInteractionEnabled:NO];
+		[clip setAutoresizingMask:UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight];
+		objc_setAssociatedObject(container, KEY("lgfix_islandClip"), clip, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	if ([clip superview] != container) [container insertSubview:clip atIndex:0];
+	if (!CGRectEqualToRect([clip frame], frame)) [clip setFrame:frame];
+	setContinuousCorners([clip layer], radius);
+	[[clip layer] setMasksToBounds:YES];
+	if ([glass superview] != clip) [clip addSubview:glass];
+	CGRect glassFrame = CGRectInset(frame, -outset, -outset);
+	CGSize oldSize = [glass bounds].size;
+	BOOL resized = fabs(oldSize.width - glassFrame.size.width) > 0.5 || fabs(oldSize.height - glassFrame.size.height) > 0.5;
+	[glass setHidden:NO];
+	if (resized) [glass setFrame:glassFrame];
+	setContinuousCorners([glass layer], radius + outset);
+	[[glass layer] setMasksToBounds:YES];
+	if (resized && [glass respondsToSelector:@selector(applyFilters)])
+		((void (*)(id, SEL))objc_msgSend)(glass, @selector(applyFilters));
+	// The highlight ring is up to 2.5 capture pixels wide. At the stock capture scale for this size (about 0.3
+	// with Global.Quality 0.1) that is 8 pt of coarse dots, more than the outset cuts off; at scale 1 it is
+	// 2.5 pt and falls entirely into the clipped part.
+	if (access(CTLDIR "/no-island-scale", F_OK) != 0) {
+		@try {
+			id current = [[glass layer] valueForKey:S("scale")];
+			if (![current respondsToSelector:@selector(doubleValue)] || fabs([current doubleValue] - 1.0) > 0.01)
+				[[glass layer] setValue:[NSNumber numberWithDouble:1.0] forKey:S("scale")];
+		} @catch (id e) {}
+	}
+	// The glass draws a specular rim, strongest at the top left: on the small island it reads as a stray
+	// line. Off unless DynamicIsland.SpecularEnabled is set.
+	SEL overrideSel = sel_registerName("lgSpecularEnabledOverride"), setOverrideSel = sel_registerName("setLgSpecularEnabledOverride:");
+	if ([glass respondsToSelector:overrideSel] && [glass respondsToSelector:setOverrideSel]) {
+		if (!pPrefBool) pPrefBool = dlsym(RTLD_DEFAULT, "LG_prefBool");
+		BOOL specular = pPrefBool ? pPrefBool(S("DynamicIsland.SpecularEnabled"), NO) : NO;
+		id current = ((id (*)(id, SEL))objc_msgSend)(glass, overrideSel);
+		if (!current || [current boolValue] != specular)
+			((void (*)(id, SEL, id))objc_msgSend)(glass, setOverrideSel, [NSNumber numberWithBool:specular]);
+		// The glass also keeps an edge line (shape layer) and the specular gradient as sublayers; the edge
+		// line is shown regardless of the override.
+		if (!specular) {
+			Class shapeClass = objc_getClass("CAShapeLayer"), gradientClass = objc_getClass("CAGradientLayer");
+			for (CALayer *sub in [[glass layer] sublayers])
+				if (([sub isKindOfClass:shapeClass] || [sub isKindOfClass:gradientClass]) && ![sub isHidden]) [sub setHidden:YES];
+		}
+	}
+	islandSetFillsHidden(window, YES);
+	islandSetContainerFillsHidden(container, YES);
+	islandSetElementAdapted(container, YES);
+	// The element's views are filled in after this layout without another one: look again a few times
+	if (!objc_getAssociatedObject(container, KEY("lgfix_islandRecheck"))) {
+		objc_setAssociatedObject(container, KEY("lgfix_islandRecheck"), container, OBJC_ASSOCIATION_ASSIGN);
+		__weak UIView *weakContainer = container;
+		static const int delays[5] = { 30, 80, 160, 320, 700 };
+		for (int i = 0; i < 5; i++) {
+			BOOL last = i == 4;
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delays[i] * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+				UIView *strong = weakContainer;
+				if (!strong) return;
+				if (last) objc_setAssociatedObject(strong, KEY("lgfix_islandRecheck"), nil, OBJC_ASSOCIATION_ASSIGN);
+				UIView *current = objc_getAssociatedObject(strong, KEY("lgfix_kIslandGlassKey"));
+				@try {
+					if (current && ![current isHidden]) {
+						islandSetElementAdapted(strong, YES);
+						islandSetContainerFillsHidden(strong, YES);
+						if ([strong window]) islandSetFillsHidden([strong window], YES);
+					}
+				} @catch (id e) {}
+			});
+		}
+	}
+
+	UIColor *tintColor = islandTintColor();
+	if (tintColor && !tint) {
+		tint = [[UIView alloc] initWithFrame:frame];
+		[tint setUserInteractionEnabled:NO];
+		[tint setAutoresizingMask:UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight];
+		objc_setAssociatedObject(container, KEY("lgfix_islandTint"), tint, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	[tint setHidden:!tintColor];
+	if (tintColor) {
+		if ([tint superview] != container) [container insertSubview:tint aboveSubview:clip];
+		[tint setFrame:frame];
+		[tint setBackgroundColor:tintColor];
+		setContinuousCorners([tint layer], radius);
+		[[tint layer] setMasksToBounds:YES];
+	}
+}
+
+#pragma mark - helpers
+
+static const char *cname(id obj) {
+	return obj ? class_getName(object_getClass(obj)) : "nil";
+}
+
+static NSArray *allWindows(void) {
+	Class win = objc_getClass("UIWindow");
+	SEL sel = sel_registerName("allWindowsIncludingInternalWindows:onlyVisibleWindows:");
+	if (!win || !class_getClassMethod(win, sel)) return nil;
+	return ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)((id)win, sel, YES, YES);
+}
+
+#pragma mark - cover sheet: icons behind the glass
+
+static dispatch_source_t sCoverTimer;
+
+// iOS 17 hides SBIconContentView while the cover sheet is up and only shows it when the unlock finishes,
+// so the cover sheet glass has nothing but wallpaper behind it. Keep the icons visible while the device is
+// authenticated (never while locked). Kill switch: CTLDIR/no-icons-behind
+static IMP sIconSetHiddenOrig;
+static __weak UIView *sIconContentView;
+
+static BOOL deviceAuthenticated(void) {
+	@try {
+		SEL getter = sel_registerName("authenticationController"), auth = sel_registerName("isAuthenticated");
+		id app = [UIApplication sharedApplication];
+		id controller = [app respondsToSelector:getter] ? ((id (*)(id, SEL))objc_msgSend)(app, getter) : nil;
+		return [controller respondsToSelector:auth] && ((BOOL (*)(id, SEL))objc_msgSend)(controller, auth);
+	} @catch (id e) {}
+	return NO;
+}
+
+static BOOL coverSheetVisible(void) {
+	@try {
+		Class cls = objc_getClass("SBCoverSheetPresentationManager");
+		SEL shared = sel_registerName("sharedInstance"), visible = sel_registerName("isVisible");
+		if (!cls || !class_getClassMethod(cls, shared)) return NO;
+		id manager = ((id (*)(id, SEL))objc_msgSend)((id)cls, shared);
+		return [manager respondsToSelector:visible] && ((BOOL (*)(id, SEL))objc_msgSend)(manager, visible);
+	} @catch (id e) {}
+	return NO;
+}
+
+// Only while the cover sheet is on screen: other reasons the system hides the icons are left alone
+static BOOL iconsBehindWanted(void) {
+	return access(CTLDIR "/no-icons-behind", F_OK) != 0 && resolveLiquidAss() && pHostEnabled(S("CoverSheet")) &&
+	       coverSheetVisible() && deviceAuthenticated();
+}
+
+static void iconContentCallOrig(id self, BOOL hidden) {
+	SEL sel = @selector(setHidden:);
+	if (sIconSetHiddenOrig) {
+		((void (*)(id, SEL, BOOL))sIconSetHiddenOrig)(self, sel, hidden);
+	} else {
+		struct objc_super sup = { self, class_getSuperclass(objc_getClass("SBIconContentView")) };
+		((void (*)(struct objc_super *, SEL, BOOL))objc_msgSendSuper)(&sup, sel, hidden);
+	}
+}
+
+static void iconContentSetHidden(id self, SEL _cmd, BOOL hidden) {
+	sIconContentView = self;
+	if (hidden) {
+		BOOL keep = NO;
+		@try { keep = iconsBehindWanted(); } @catch (id e) {}
+		objc_setAssociatedObject(self, KEY("lgfix_iconsWantHidden"), self, OBJC_ASSOCIATION_ASSIGN);
+		if (keep) hidden = NO;
+	} else {
+		objc_setAssociatedObject(self, KEY("lgfix_iconsWantHidden"), nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+	iconContentCallOrig(self, hidden);
+}
+
+// Follows lock state: the system asked for hidden icons -> hidden while locked, visible while authenticated
+static void iconContentSync(void) {
+	UIView *view = sIconContentView;
+	if (!view) {
+		Class cls = objc_getClass("SBIconContentView");
+		if (!cls) return;
+		for (UIWindow *window in allWindows()) {
+			if (!strstr(cname(window), "HomeScreen")) continue;
+			sIconContentView = view = findViewOfClass(window, cls, 0);
+			if (view) break;
+		}
+		if (!view) return;
+		// Found hidden before the hook saw a call: the system wants it hidden
+		if ([view isHidden]) objc_setAssociatedObject(view, KEY("lgfix_iconsWantHidden"), view, OBJC_ASSOCIATION_ASSIGN);
+	}
+	if (!objc_getAssociatedObject(view, KEY("lgfix_iconsWantHidden"))) return;
+	BOOL shouldHide = !iconsBehindWanted();
+	if ([view isHidden] != shouldHide) iconContentCallOrig(view, shouldHide);
+}
+
+static void iconContentInstall(void) {
+	if (getenv("LGFIX_ICONHOOK")) return;   // an earlier build owns the hook
+	Class cls = objc_getClass("SBIconContentView");
+	if (!cls) return;
+	SEL sel = @selector(setHidden:);
+	if (!class_addMethod(cls, sel, (IMP)iconContentSetHidden, "v@:B")) {
+		unsigned int count = 0;
+		Method *methods = class_copyMethodList(cls, &count);
+		for (unsigned int m = 0; m < count; m++)
+			if (method_getName(methods[m]) == sel)
+				sIconSetHiddenOrig = method_setImplementation(methods[m], (IMP)iconContentSetHidden);
+		free(methods);
+	}
+	setenv("LGFIX_ICONHOOK", BUILD_TAG, 1);
+	flog("icons: setHidden hook installed own=%d", sIconSetHiddenOrig != NULL);
+}
+
+static void coverStartPoll(void) {
+	if (sCoverTimer) return;
+	iconContentInstall();
+	sCoverTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+	dispatch_source_set_timer(sCoverTimer, DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
+	dispatch_source_set_event_handler(sCoverTimer, ^{
+		@try {
+			const char *owner = getenv("LGFIX_ICONHOOK");
+			if (owner && !strcmp(owner, BUILD_TAG)) iconContentSync();
+		} @catch (id e) {}
+	});
+	dispatch_resume(sCoverTimer);
+	flog("cover: poll started");
+}
+
+// Stops the auto-repeat that -increaseVolume / -decreaseVolume (the button-down calls) start. Never call those
+// two from here again: without -cancelVolumeEvent the volume keeps stepping up and down.
+static void volumeCancelRepeat(void) {
+	@try {
+		SEL getter = sel_registerName("volumeControl"), cancel = sel_registerName("cancelVolumeEvent");
+		id app = [UIApplication sharedApplication];
+		id control = [app respondsToSelector:getter] ? ((id (*)(id, SEL))objc_msgSend)(app, getter) : nil;
+		BOOL ok = [control respondsToSelector:cancel];
+		if (ok) ((void (*)(id, SEL))objc_msgSend)(control, cancel);
+		if (ok) [NSObject cancelPreviousPerformRequestsWithTarget:control];
+		flog("volume: repeat cancelled ok=%d", ok);
+	} @catch (id e) { flog("volume: cancel threw"); }
+}
+
+// For the private test host
+static int sTestHits;
+static void testHandler1(id view) { sTestHits += 1; }
+static void testHandler2(id view) { sTestHits += 10; }
+int lgfix_selftest(const char *path) {
+	@autoreleasepool {
+		UIView *root = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 100, 300)];
+		UIView *child = [[UISlider alloc] initWithFrame:CGRectMake(1, 2, 50, 20)];
+		[[child layer] setCornerRadius:7];
+		[child setBackgroundColor:[UIColor redColor]];
+		[root addSubview:child];
+		FILE *f = fopen(path, "w");
+		if (!f) return -1;
+		fprintf(f, "# selftest windows=%p\n", (__bridge void *)allWindows());
+
+		// hook plumbing: a class with its own layoutSubviews (UISlider) and one without (UIStackView subclass)
+		lgfix_register("t1", testHandler1);
+		lgfix_register("t2", testHandler2);
+		fprintf(f, "# registered\n"); fflush(f);
+		Class sub = objc_allocateClassPair([UIView class], "LGFixSelfTestView", 0);
+		objc_registerClassPair(sub);
+		int h1 = lgfix_hook_layout("UISlider", "t1");
+		int h2 = lgfix_hook_layout("LGFixSelfTestView", "t2");
+		fprintf(f, "# hooked %d %d\n", h1, h2); fflush(f);
+		[child setNeedsLayout];
+		[child layoutIfNeeded];
+		UIView *plain = [[sub alloc] initWithFrame:CGRectMake(0, 0, 10, 10)];
+		[plain setNeedsLayout];
+		[plain layoutIfNeeded];
+		fprintf(f, "# hooks h1=%d h2=%d hits=%d (want 11)\n", h1, h2, sTestHits); fflush(f);
+
+		// volume handler against a stand-in object without liquidass loaded: must be a no-op
+		volumeUpdate(child);
+		fprintf(f, "# volumeUpdate without liquidass ok, resolve=%d\n", resolveLiquidAss());
+		// color matrix filter: the value must survive a round trip through the filter
+		@try {
+			id filter = blackKeyFilter();
+			NSValue *back = [filter valueForKey:S("inputColorMatrix")];
+			float m[20] = { 0 };
+			if (back && !strcmp([back objCType], "{CAColorMatrix=ffffffffffffffffffff}")) [back getValue:m];
+			fprintf(f, "# blackKey filter=%s type=%s m11=%.2f m42=%.4f (want 1.00 1.0000)\n", cname(filter),
+			        back ? [back objCType] : "-", m[0], m[16]);
+		} @catch (id e) { fprintf(f, "# blackKey threw\n"); }
+		fclose(f);
+		return 200 + sTestHits;
+	}
+}
+
+#pragma mark - dev loader and constructor
+
+// Timers and notifications of a build that was taken over stay registered; only the newest one acts
+static BOOL isNewestBuild(void) {
+	const char *newest = getenv("LGFIX_NEWEST");
+	return newest && !strcmp(newest, BUILD_TAG);
+}
+
+// dlopen the dylib named in CTLDIR/next (root-owned), so new builds can be tried without a respring
+static void loadNext(void) {
+	char path[512] = "";
+	FILE *f = fopen(CTLDIR "/next", "r");
+	if (!f) return;
+	if (!fgets(path, sizeof(path), f)) path[0] = 0;
+	fclose(f);
+	path[strcspn(path, "\r\n")] = 0;
+	if (!path[0]) return;
+	void *handle = dlopen(path, RTLD_NOW);
+	flog("load %s -> %p %s", path, handle, handle ? "ok" : dlerror());
+}
+
+static void registerHandlers(void (*reg)(const char *, LGFixHandler)) {
+	reg("volume", volumeUpdate);
+	reg("cc.container", ccContainerUpdate);
+	reg("cc.slider", ccSliderUpdate);
+	reg("island", islandUpdate);
+	reg("island.element", islandElementUpdate);
+	reg("widget.fill", widgetFillUpdate);
+	reg("widget.list", widgetListUpdate);
+}
+
+static void installHooks(int (*hook)(const char *, const char *), const char *why) {
+	flog("%s: island=%d element=%d", why, hook("SBSystemApertureContainerView", "island"), hook("SAUIElementView", "island.element"));
+	flog("%s: widgetFill=%d list=%d", why, hook("CHUISWidgetHostViewControllerView", "widget.fill"),
+	     hook("SBIconListView", "widget.list"));
+	@try {
+		Class widgetClass = objc_getClass("CHUISWidgetHostViewControllerView");
+		if (widgetClass)
+			for (UIWindow *window in allWindows())
+				if (!strcmp(cname(window), "SBHomeScreenWindow")) widgetFillWalk(window, widgetClass, 0);
+	} @catch (id e) {}
+	flog("%s: hooks volume=%d container=%d slider=%d liquidass=%d", why,
+	     hook("SBElasticSliderView", "volume"),
+	     hook("CCUIContentModuleContentContainerView", "cc.container"),
+	     hook("CCUIContinuousSliderView", "cc.slider"),
+	     resolveLiquidAss());
+}
+
+#pragma mark - widgets drawn smaller than their slot (widget page left of the home screen)
+
+// With a grid tweak the widget content is laid out at the home screen's reduced size (315x147) while the widget
+// page keeps full-size slots (364x170): the content sat in the top left corner of its glass. Scale it to fill.
+static void widgetFillUpdate(id object) {
+	UIView *content = object;
+	UIView *slot = [content superview];
+	if (!slot) return;
+	const void *key = KEY("lgfix_widgetFill");
+	CGSize own = [content bounds].size, outer = [slot bounds].size;
+	CGFloat scale = own.width > 1.0 ? outer.width / own.width : 1.0;
+	BOOL fill = access(CTLDIR "/no-widget-fill", F_OK) != 0 && own.height > 1.0 && scale > 1.02 && scale < 1.5 &&
+	            fabs(outer.height / own.height - scale) < 0.03 && CGAffineTransformIsIdentity([content transform]) &&
+	            fabs([content frame].origin.x) < 0.5 && fabs([content frame].origin.y) < 0.5;
+	CALayer *layer = [slot layer];
+	if (fill) {
+		// sublayerTransform works around the slot's centre; move it so the top left corner stays in place
+		CATransform3D t = CATransform3DMakeScale(scale, scale, 1.0);
+		t.m41 = (scale - 1.0) * outer.width * 0.5;
+		t.m42 = (scale - 1.0) * outer.height * 0.5;
+		if (!CATransform3DEqualToTransform([layer sublayerTransform], t)) {
+			[layer setSublayerTransform:t];
+			flog("widget: content %.0fx%.0f scaled %.3f to fill %.0fx%.0f", own.width, own.height, scale, outer.width, outer.height);
+		}
+		objc_setAssociatedObject(slot, key, slot, OBJC_ASSOCIATION_ASSIGN);
+	} else if (objc_getAssociatedObject(slot, key)) {
+		[layer setSublayerTransform:CATransform3DIdentity];
+		objc_setAssociatedObject(slot, key, nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+}
+
+static void widgetFillWalk(UIView *view, Class cls, int depth) {
+	if (!view || depth > 40) return;
+	if ([view isKindOfClass:cls]) { widgetFillUpdate(view); return; }
+	for (UIView *sub in [view subviews]) widgetFillWalk(sub, cls, depth + 1);
+}
+
+// Widget views that come back from the recycling pool are not laid out again; catch them when their page lays out
+static void widgetListUpdate(id object) {
+	UIView *list = object;
+	const void *key = KEY("lgfix_widgetListPending");
+	if (objc_getAssociatedObject(list, key)) return;
+	objc_setAssociatedObject(list, key, list, OBJC_ASSOCIATION_ASSIGN);
+	__weak UIView *weakList = list;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+		UIView *strongList = weakList;
+		if (!strongList) return;
+		objc_setAssociatedObject(strongList, key, nil, OBJC_ASSOCIATION_ASSIGN);
+		Class widgetClass = objc_getClass("CHUISWidgetHostViewControllerView");
+		@try {
+			if (widgetClass) widgetFillWalk(strongList, widgetClass, 0);
+		} @catch (id e) {}
+	});
+}
+
+static void registerRuntime(void) {
+	dispatch_async(dispatch_get_main_queue(), ^{ coverStartPoll(); });
+	static int prefsToken;
+	notify_register_dispatch("dylv.liquidassprefs/Reload", &prefsToken, dispatch_get_main_queue(), ^(int t) {
+		if (!isNewestBuild()) return;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+			[sIslandContainer setNeedsLayout];
+		});
+	});
+}
+
+__attribute__((constructor)) static void lgfixInit(void) {
+	if (getenv("LGFIX_SELFTEST")) return;
+	if (access(CTLDIR "/disabled", F_OK) == 0) return;
+	mkdir(OUTDIR, 0755);
+	setenv("LGFIX_NEWEST", BUILD_TAG, 1);
+
+	// A build that is already in the process owns hooks and notifications; just take its handlers over
+	void (*firstRegister)(const char *, LGFixHandler) = dlsym(RTLD_DEFAULT, "lgfix_register");
+	int (*firstHook)(const char *, const char *) = dlsym(RTLD_DEFAULT, "lgfix_hook_layout");
+	BOOL first = !firstRegister || firstRegister == lgfix_register;
+	if (!first) {
+		registerHandlers(firstRegister);
+		if (firstHook) dispatch_async(dispatch_get_main_queue(), ^{ installHooks(firstHook, "takeover"); });
+		registerRuntime();
+		return;
+	}
+
+	registerHandlers(lgfix_register);
+	static int loadToken;
+	notify_register_dispatch("dylv.liquidass.diag/load", &loadToken, dispatch_get_main_queue(), ^(int t) {
+		loadNext();
+	});
+	dispatch_async(dispatch_get_main_queue(), ^{
+		installHooks(lgfix_hook_layout, "init");
+		registerRuntime();
+	});
+}

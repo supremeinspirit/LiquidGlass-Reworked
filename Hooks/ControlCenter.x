@@ -146,7 +146,8 @@ static CGFloat ccGlassRadiusForMaterial(UIView *mat) {
     if (w < 30.0 || h < 30.0) return -1.0;
 
     UIView *module = ccModuleAncestor(mat);
-    if (module && ccIsModuleCandidate(module)) return ccModuleCornerRadius(module);
+    if (module && ccIsModuleCandidate(module))
+        return fmin(ccModuleCornerRadius(module), ccPillRadius(mat));
     if (w > 100.0 && h < 100.0) return h * 0.5;
     if (h > 100.0 && w < 100.0) return w * 0.5;
     return ccPillRadius(mat);
@@ -276,9 +277,39 @@ static void ccAssociateOverlayRootWithFilters(id filters, UIView *overlayRoot) {
     }
 }
 
+static void *kCCFullscreenOriginalScaleKey = &kCCFullscreenOriginalScaleKey;
+
+// the stock material samples its backdrop at a fraction of screen size, which
+// a heavy blur hides; with the blur capped the capture has to be sharper or
+// the background turns into visible blocks (seen on iOS 13)
+static void ccSetBackdropCaptureScale(CALayer *layer, BOOL enabled) {
+    static Class backdropClass;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ backdropClass = NSClassFromString(@"CABackdropLayer"); });
+    if (!backdropClass || ![layer isKindOfClass:backdropClass]) return;
+    static const CGFloat kCCCappedBlurCaptureScale = 0.5;
+    @try {
+        NSNumber *original = objc_getAssociatedObject(layer, kCCFullscreenOriginalScaleKey);
+        CGFloat current = [[layer valueForKey:@"scale"] doubleValue];
+        if (enabled) {
+            if (current >= kCCCappedBlurCaptureScale - 0.001) return;
+            if (!original)
+                objc_setAssociatedObject(layer, kCCFullscreenOriginalScaleKey, @(current),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [layer setValue:@(kCCCappedBlurCaptureScale) forKey:@"scale"];
+        } else if (original) {
+            [layer setValue:original forKey:@"scale"];
+            objc_setAssociatedObject(layer, kCCFullscreenOriginalScaleKey, nil,
+                                     OBJC_ASSOCIATION_ASSIGN);
+        }
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 static void ccSetBlurCapOnLayerTree(CALayer *layer, BOOL enabled, CGFloat radius) {
     if (!layer) return;
     ccSetBlurCapMarker(layer, enabled);
+    ccSetBackdropCaptureScale(layer, enabled);
     ccSetBlurCapOnFilters(layer.filters, enabled, radius);
     @try {
         ccSetBlurCapOnFilters([layer valueForKey:@"backgroundFilters"], enabled, radius);

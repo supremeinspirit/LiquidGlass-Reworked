@@ -1,4 +1,5 @@
 #import "LGPSurfaceController.h"
+#import "../Shared/LGLegacyCompat.h"
 #import "LGPrefsDataSupport.h"
 #import "LGPrefsSurfaceCatalog.h"
 #import "LGPrefsUIHelpers.h"
@@ -10,7 +11,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 #import <objc/runtime.h>
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <notify.h>
 
 #ifndef LG_PACKAGE_VERSION
@@ -377,7 +377,7 @@ static void LGRestartAssistiveTouchDaemon(void) {
 
 - (void)importPreferences {
     UIDocumentPickerViewController *picker =
-        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeJSON]];
+        LGMakeJSONOpenPicker();
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
     [self presentViewController:picker animated:YES completion:nil];
@@ -1108,8 +1108,8 @@ static void LGRestartAssistiveTouchDaemon(void) {
     toggle.on = [LGReadPreference(item[@"key"], item[@"default"]) boolValue];
     objc_setAssociatedObject(toggle, kLGDefaultValueKey, item[@"default"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(toggle, kLGPreferenceKeyKey, item[@"key"], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    [toggle addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull action) {
-        UISwitch *sender = (UISwitch *)action.sender;
+    LGAddControlHandler(toggle, UIControlEventValueChanged, ^(__kindof UIControl *lgSender) {
+        UISwitch *sender = (UISwitch *)lgSender;
         if ([item[@"key"] isEqualToString:@"AppIcons.Enabled"] && sender.isOn) {
             __weak UISwitch *weakSender = sender;
             UIAlertController *alert = [UIAlertController
@@ -1163,7 +1163,7 @@ static void LGRestartAssistiveTouchDaemon(void) {
         if ([item[@"controls_following_panel"] boolValue]) {
             [self updatePanelsControlledByEnabledKey:item[@"key"] enabled:sender.isOn animated:YES];
         }
-    }] forControlEvents:UIControlEventValueChanged];
+    });
     objc_setAssociatedObject(toggle, kLGControlledByEnabledKey, item[@"controls_following_panel"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return toggle;
 }
@@ -1271,10 +1271,11 @@ static void LGRestartAssistiveTouchDaemon(void) {
             __strong typeof(weakSelf) strongSelf = weakSelf;
             UIButton *strongMenuButton = weakMenuButton;
             if (strongSelf && strongMenuButton) {
-                strongMenuButton.menu = [strongSelf menuForItem:item
-                                                   currentValue:selectedValue
-                                                     menuButton:strongMenuButton
-                                                    titleUpdate:applyMenuSelectionTitle];
+                LGSetButtonPrimaryMenu(strongMenuButton,
+                    [strongSelf menuForItem:item
+                               currentValue:selectedValue
+                                 menuButton:strongMenuButton
+                                titleUpdate:applyMenuSelectionTitle]);
                 if ([item[@"reload_on_change"] boolValue]) {
                     [strongSelf updateVisibleValueControlledItemsAnimated:YES];
                 }
@@ -1299,7 +1300,6 @@ static void LGRestartAssistiveTouchDaemon(void) {
 
     UIButton *menuButton = [UIButton buttonWithType:UIButtonTypeSystem];
     menuButton.translatesAutoresizingMaskIntoConstraints = NO;
-    menuButton.showsMenuAsPrimaryAction = YES;
     menuButton.tintColor = _accentColor;
     menuButton.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
     #pragma clang diagnostic push
@@ -1352,10 +1352,11 @@ static void LGRestartAssistiveTouchDaemon(void) {
         }
     };
 
-    menuButton.menu = [self menuForItem:item
-                           currentValue:currentValue
-                             menuButton:menuButton
-                            titleUpdate:applyMenuSelectionTitle];
+    LGSetButtonPrimaryMenu(menuButton,
+        [self menuForItem:item
+             currentValue:currentValue
+               menuButton:menuButton
+              titleUpdate:applyMenuSelectionTitle]);
 
     UIView *headerRow = [self controlHeaderRowWithTitleLabel:titleLabel
                                               accessoryViews:@[menuButton]
@@ -1433,13 +1434,13 @@ static void LGRestartAssistiveTouchDaemon(void) {
                                                      spacing:8.0];
 
     NSString *preferenceKey = item[@"key"];
-    [slider addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull action) {
-        UISlider *sender = (UISlider *)action.sender;
+    LGAddControlHandler(slider, UIControlEventValueChanged, ^(__kindof UIControl *lgSender) {
+        UISlider *sender = (UISlider *)lgSender;
         valueLabel.text = LGFormatSliderValue(sender.value, decimals);
-    }] forControlEvents:UIControlEventValueChanged];
+    });
     UIControlEvents commitEvents = UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel;
-    [slider addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull action) {
-        UISlider *sender = (UISlider *)action.sender;
+    LGAddControlHandler(slider, commitEvents, ^(__kindof UIControl *lgSender) {
+        UISlider *sender = (UISlider *)lgSender;
         CGFloat value = sender.value;
         valueLabel.text = LGFormatSliderValue(value, decimals);
         LGWritePreference(preferenceKey, @(value));
@@ -1450,7 +1451,7 @@ static void LGRestartAssistiveTouchDaemon(void) {
             CFPreferencesAppSynchronize((__bridge CFStringRef)LGPrefsDomain);
             notify_post(LGPrefsChangedNotificationCString);
         }
-    }] forControlEvents:commitEvents];
+    });
 
     [stack addArrangedSubview:headerRow];
     [stack addArrangedSubview:slider];
@@ -1474,15 +1475,13 @@ static void LGRestartAssistiveTouchDaemon(void) {
     NSString *key = item[@"key"];
     NSString *fallback = item[@"default"] ?: @"#FFFFFF00";
     id stored = LGReadPreferenceObject(key, fallback);
-    UIColorWell *well = [[UIColorWell alloc] initWithFrame:CGRectZero];
-    well.selectedColor = LGColorFromRGBAHex([stored isKindOfClass:NSString.class] ? stored : fallback);
-    well.supportsAlpha = YES;
+    UIView *well = LGMakeColorWell(
+        LGColorFromRGBAHex([stored isKindOfClass:NSString.class] ? stored : fallback),
+        ^(UIColor *color) {
+            LGWritePreferenceObject(key, LGRGBAHexFromColor(color));
+        });
     [well.widthAnchor constraintEqualToConstant:32.0].active = YES;
     [well.heightAnchor constraintEqualToConstant:32.0].active = YES;
-    [well addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-        UIColorWell *sender = (UIColorWell *)action.sender;
-        LGWritePreferenceObject(key, LGRGBAHexFromColor(sender.selectedColor));
-    }] forControlEvents:UIControlEventValueChanged];
 
     [stack addArrangedSubview:[self controlHeaderRowWithTitleLabel:titleLabel accessoryViews:@[well] spacing:12.0]];
     [stack addArrangedSubview:[self controlSubtitleLabelWithText:item[@"subtitle"]]];
@@ -1561,7 +1560,7 @@ static void LGRestartAssistiveTouchDaemon(void) {
 
     __weak typeof(self) weakSelf = self;
     __weak UILabel *weakValueLabel = valueLabel;
-    [button addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull action) {
+    LGAddControlHandler(button, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
         NSString *current = weakValueLabel.text.length ? weakValueLabel.text : fallback;
@@ -1579,7 +1578,7 @@ static void LGRestartAssistiveTouchDaemon(void) {
             weakValueLabel.text = text;
             LGWritePreferenceObject(preferenceKey, text);
         });
-    }] forControlEvents:UIControlEventTouchUpInside];
+    });
     return button;
 }
 

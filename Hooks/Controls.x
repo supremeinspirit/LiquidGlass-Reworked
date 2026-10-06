@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "../Shared/LGLegacyCompat.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <float.h>
@@ -704,13 +705,12 @@ static void LGInstallSettingsSwitch(UISwitch *owner) {
         overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth |
                                    UIViewAutoresizingFlexibleHeight;
         __weak UISwitch *weakOwner = owner;
-        [overlay addAction:[UIAction actionWithHandler:^(UIAction *action) {
+        LGAddControlHandler(overlay, UIControlEventValueChanged, ^(LGPrefsLiquidSwitch *sender) {
             UISwitch *strongOwner = weakOwner;
-            LGPrefsLiquidSwitch *sender = (LGPrefsLiquidSwitch *)action.sender;
             if (!strongOwner) return;
             [strongOwner setOn:sender.isOn animated:NO];
             [strongOwner sendActionsForControlEvents:UIControlEventValueChanged];
-        }] forControlEvents:UIControlEventValueChanged];
+        });
         objc_setAssociatedObject(owner, kLGSettingsSwitchOverlayKey, overlay,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [owner addSubview:overlay];
@@ -1286,13 +1286,12 @@ static void LGInstallSettingsSlider(UISlider *owner) {
     if (!overlay) {
         overlay = [[LGPrefsLiquidSlider alloc] initWithFrame:CGRectZero];
         __weak UISlider *weakOwner = owner;
-        [overlay addAction:[UIAction actionWithHandler:^(UIAction *action) {
+        LGAddControlHandler(overlay, UIControlEventValueChanged, ^(LGPrefsLiquidSlider *sender) {
             UISlider *strongOwner = weakOwner;
-            LGPrefsLiquidSlider *sender = (LGPrefsLiquidSlider *)action.sender;
             if (!strongOwner) return;
             [strongOwner setValue:sender.value animated:NO];
             [strongOwner sendActionsForControlEvents:UIControlEventValueChanged];
-        }] forControlEvents:UIControlEventValueChanged];
+        });
         objc_setAssociatedObject(owner, kLGSettingsSliderOverlayKey, overlay,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }

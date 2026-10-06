@@ -1,4 +1,5 @@
 #import "LGPrefsUIHelpers.h"
+#import "../Shared/LGLegacyCompat.h"
 #import "LGPrefsDataSupport.h"
 #import "../Shared/LGLiveBackdropView.h"
 #import "../Shared/LGSharedSupport.h"
@@ -137,8 +138,7 @@ static void LGPerformSoftHaptic(void) {
 
 - (CGSize)intrinsicContentSize { return CGSizeMake(44.0, 44.0); }
 - (void)setPrimaryMenu:(UIMenu *)menu {
-    _button.menu = menu;
-    _button.showsMenuAsPrimaryAction = YES;
+    LGSetButtonPrimaryMenu(_button, menu);
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -808,22 +808,22 @@ void LGPresentTextInputSheet(UIViewController *controller,
         } completion:nil];
     }];
 
-    [dismissControl addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull _) {
+    LGAddControlHandler(dismissControl, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
         [weakTextField resignFirstResponder];
         cleanupObservers();
         LGDismissOverlayPanel(overlay, panel);
-    }] forControlEvents:UIControlEventTouchUpInside];
-    [cancelButton addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull _) {
+    });
+    LGAddControlHandler(cancelButton, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
         [weakTextField resignFirstResponder];
         cleanupObservers();
         LGDismissOverlayPanel(overlay, panel);
-    }] forControlEvents:UIControlEventTouchUpInside];
-    [applyButton addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull _) {
+    });
+    LGAddControlHandler(applyButton, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
         [weakTextField resignFirstResponder];
         cleanupObservers();
         if (applyBlock) applyBlock(textField.text ?: @"");
         LGDismissOverlayPanel(overlay, panel);
-    }] forControlEvents:UIControlEventTouchUpInside];
+    });
 
     [controller.view addSubview:overlay];
     [UIView animateWithDuration:0.22 animations:^{
@@ -1056,24 +1056,24 @@ void LGPresentMultilineTextInputSheet(UIViewController *controller,
             [strongOverlay layoutIfNeeded];
         } completion:nil];
     }];
-    [dismissControl addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull _) {
+    LGAddControlHandler(dismissControl, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
         [weakTextView resignFirstResponder];
         cleanupObservers();
         LGDismissOverlayPanel(overlay, panel);
-    }] forControlEvents:UIControlEventTouchUpInside];
+    });
 
-    [cancelButton addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull _) {
+    LGAddControlHandler(cancelButton, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
         [weakTextView resignFirstResponder];
         cleanupObservers();
         LGDismissOverlayPanel(overlay, panel);
-    }] forControlEvents:UIControlEventTouchUpInside];
+    });
 
-    [applyButton addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull _) {
+    LGAddControlHandler(applyButton, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
         [weakTextView resignFirstResponder];
         cleanupObservers();
         if (applyBlock) applyBlock(textView.text ?: @"");
         LGDismissOverlayPanel(overlay, panel);
-    }] forControlEvents:UIControlEventTouchUpInside];
+    });
 
     [controller.view addSubview:overlay];
     [UIView animateWithDuration:0.22 animations:^{
@@ -1314,12 +1314,12 @@ UIView *LGMakeDonationRow(UIViewController *controller,
     button.contentVerticalAlignment = UIControlContentVerticalAlignmentFill;
     button.contentEdgeInsets = UIEdgeInsetsZero;
     __weak UIViewController *weakController = controller;
-    [button addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull action) {
-        (void)action;
+    LGAddControlHandler(button, UIControlEventTouchUpInside, ^(__kindof UIControl *lgSender) {
+        (void)lgSender;
         if (!address.length) return;
         UIPasteboard.generalPasteboard.string = address;
         LGPresentInfoSheet(weakController, @"Copied", @"Wallet address copied to clipboard.");
-    }] forControlEvents:UIControlEventTouchUpInside];
+    });
 
     UIView *body = [[UIView alloc] initWithFrame:CGRectZero];
     body.userInteractionEnabled = NO;

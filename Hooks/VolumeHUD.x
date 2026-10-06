@@ -101,6 +101,27 @@ static UIView *LGVolumeHUDDescendant(UIView *view, Class targetClass) {
     return nil;
 }
 
+static UIView *LGVolumeHUDIvarView(id object, const char *name) {
+    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+    if (!ivar) return nil;
+    const char *type = ivar_getTypeEncoding(ivar);
+    if (!type || type[0] != '@') return nil;
+    id value = object_getIvar(object, ivar);
+    return [value isKindOfClass:[UIView class]] ? value : nil;
+}
+
+static UIView *LGVolumeHUDDirectChild(UIView *ancestor, UIView *view) {
+    for (UIView *v = view; v; v = v.superview)
+        if (v.superview == ancestor) return v;
+    return nil;
+}
+
+static BOOL LGVolumeHUDIsInside(UIView *view, UIView *ancestor) {
+    for (UIView *v = view; v; v = v.superview)
+        if (v == ancestor) return YES;
+    return NO;
+}
+
 static void LGSetVolumeHUDBackgroundMaterialsHidden(UIView *view, BOOL hidden) {
     if ([view isKindOfClass:NSClassFromString(@"MTMaterialView")] &&
         [view.superview isKindOfClass:NSClassFromString(@"MTMaterialShadowView")]) {
@@ -117,11 +138,35 @@ static void LGSetVolumeHUDBackgroundMaterialsHidden(UIView *view, BOOL hidden) {
     for (UIView *subview in view.subviews) LGSetVolumeHUDBackgroundMaterialsHidden(subview, hidden);
 }
 
+// ios 13: the background is a plain MTMaterialView (no MTMaterialShadowView parent)
+static void LGSetVolumeHUDLegacyMaterialsHidden(UIView *view, UIView *wrapper, UIView *sliderView, BOOL hidden) {
+    if (sliderView && view == sliderView) {
+        // the slider's direct material child is its dark track; the fill sits in a clipping UIView
+        for (UIView *subview in view.subviews)
+            if ([subview isKindOfClass:NSClassFromString(@"MTMaterialView")])
+                LGSetVolumeHUDLegacyMaterialsHidden(subview, wrapper, nil, hidden);
+        return;
+    }
+    if (view != wrapper && [view isKindOfClass:NSClassFromString(@"MTMaterialView")] &&
+        !(sliderView && LGVolumeHUDIsInside(view, sliderView))) {
+        NSNumber *original = objc_getAssociatedObject(view, kLGVolumeHUDMaterialHiddenKey);
+        if (hidden) {
+            if (!original)
+                objc_setAssociatedObject(view, kLGVolumeHUDMaterialHiddenKey, @(view.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            view.hidden = YES;
+        } else if (original) {
+            view.hidden = original.boolValue;
+            objc_setAssociatedObject(view, kLGVolumeHUDMaterialHiddenKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        }
+        return;
+    }
+    for (UIView *subview in view.subviews) LGSetVolumeHUDLegacyMaterialsHidden(subview, wrapper, sliderView, hidden);
+}
+
 static void LGAppendVolumeHUDMaterialRows(UIView *view, NSString *path,
                                           NSMutableArray<NSString *> *rows) {
     NSString *nextPath = [path stringByAppendingFormat:@"/%@", NSStringFromClass(view.class)];
-    if ([view isKindOfClass:NSClassFromString(@"MTMaterialView")])
-        [rows addObject:[NSString stringWithFormat:@"%@ frame=%@ hidden=%d alpha=%.2f radius=%.2f",
+    [rows addObject:[NSString stringWithFormat:@"%@ frame=%@ hidden=%d alpha=%.2f radius=%.2f",
             nextPath, NSStringFromCGRect(view.frame), view.hidden, view.alpha, view.layer.cornerRadius]];
     for (UIView *subview in view.subviews) LGAppendVolumeHUDMaterialRows(subview, nextPath, rows);
 }
@@ -148,15 +193,16 @@ static void LGUpdateVolumeHUDGlass(SBElasticSliderMaterialWrapperView *self) {
     UIView *shadow = nil;
     UIView *sliderWrapper = nil;
     UIView *sliderView = nil;
-    @try {
-        base = [self valueForKey:@"_baseMaterialView"];
-        cap = [self valueForKey:@"_captureOnlyMaterialView"];
-        shadow = [self valueForKey:@"_shadowView"];
-        sliderWrapper = [self valueForKey:@"_sliderWrapperView"];
-        sliderView = [self valueForKey:@"_sliderView"];
-    } @catch (...) {}
+    // ios 13 has no _captureOnlyMaterialView/_shadowView, so read each ivar on its own
+    base = (MTMaterialView *)LGVolumeHUDIvarView(self, "_baseMaterialView");
+    cap = (MTMaterialView *)LGVolumeHUDIvarView(self, "_captureOnlyMaterialView");
+    shadow = LGVolumeHUDIvarView(self, "_shadowView");
+    sliderWrapper = LGVolumeHUDIvarView(self, "_sliderWrapperView");
+    sliderView = LGVolumeHUDIvarView(self, "_sliderView");
     if (!sliderView)
         sliderView = LGVolumeHUDDescendant(self, NSClassFromString(@"SBElasticVolumeSliderView"));
+    if (!sliderView)
+        sliderView = LGVolumeHUDDescendant(self, NSClassFromString(@"SBElasticSliderView"));
 
     if (!LGVolumeHUDEnabled()) {
         LGLiveBackdropView *existing = objc_getAssociatedObject(self, kLGVolumeHUDGlassKey);
@@ -167,6 +213,7 @@ static void LGUpdateVolumeHUDGlass(SBElasticSliderMaterialWrapperView *self) {
         if (cap) cap.hidden = NO;
         if (shadow) shadow.hidden = NO;
         LGSetVolumeHUDBackgroundMaterialsHidden(self, NO);
+        LGSetVolumeHUDLegacyMaterialsHidden(self, self, sliderView, NO);
         return;
     }
 
@@ -174,16 +221,19 @@ static void LGUpdateVolumeHUDGlass(SBElasticSliderMaterialWrapperView *self) {
     if (cap) cap.hidden = YES;
     if (shadow) shadow.hidden = YES;
     LGSetVolumeHUDBackgroundMaterialsHidden(self, YES);
+    if (LGVolumeHUDNeedsLegacyMaterialWorkaround())
+        LGSetVolumeHUDLegacyMaterialsHidden(self, self, sliderView, YES);
 
     LGVolumeHUDVibranceView *vibrance = objc_getAssociatedObject(self, kLGVolumeHUDVibranceKey);
     if (!vibrance) {
         vibrance = [[LGVolumeHUDVibranceView alloc] initWithFrame:self.bounds];
         if (vibrance) {
             objc_setAssociatedObject(self, kLGVolumeHUDVibranceKey, vibrance, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            if (sliderWrapper) {
-                [self insertSubview:vibrance belowSubview:sliderWrapper];
+            UIView *above = sliderWrapper ?: LGVolumeHUDDirectChild(self, sliderView);
+            if (above) {
+                [self insertSubview:vibrance belowSubview:above];
             } else {
-                [self addSubview:vibrance];
+                [self insertSubview:vibrance atIndex:0];
             }
         }
     }
@@ -197,6 +247,9 @@ static void LGUpdateVolumeHUDGlass(SBElasticSliderMaterialWrapperView *self) {
 
         [self insertSubview:glass atIndex:0];
     }
+    if (vibrance && glass.superview == self && vibrance.superview == self &&
+        [self.subviews indexOfObject:glass] > [self.subviews indexOfObject:vibrance])
+        [self insertSubview:glass belowSubview:vibrance];
 
     CGFloat radius = MIN(self.bounds.size.width, self.bounds.size.height) * 0.5f;
 

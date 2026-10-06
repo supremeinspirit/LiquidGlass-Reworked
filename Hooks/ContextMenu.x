@@ -51,6 +51,22 @@ static void ctxRememberFrame(UIView *view) {
         objc_setAssociatedObject(view, kCtxOriginalFrameKey, [NSValue valueWithCGRect:view.frame], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// iOS 13 builds the menu from _UIContextMenuActionsListView (an interface
+// action group); the collection-view based _UIContextMenuListView came in iOS 14
+static NSString *ctxListClassName(void) {
+    static NSString *name;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        name = NSClassFromString(@"_UIContextMenuListView")
+            ? @"_UIContextMenuListView" : @"_UIContextMenuActionsListView";
+    });
+    return name;
+}
+
+static BOOL ctxUsesActionsListView(void) {
+    return [ctxListClassName() isEqualToString:@"_UIContextMenuActionsListView"];
+}
+
 static UIView *findDescendantMatching(UIView *root, BOOL (^match)(UIView *v)) {
     for (UIView *sub in root.subviews) {
         if (match(sub)) return sub;
@@ -62,7 +78,7 @@ static UIView *findDescendantMatching(UIView *root, BOOL (^match)(UIView *v)) {
 
 static BOOL isInsideContextMenu(UIView *v) {
     return hasAncestorOfClassName(v, @"_UIContextMenuContainerView") ||
-           hasAncestorOfClassName(v, @"_UIContextMenuListView");
+           hasAncestorOfClassName(v, ctxListClassName());
 }
 
 static BOOL ctxCellContextViewIsStock(UIView *view) {
@@ -158,7 +174,7 @@ static void styleContextMenuReusableGapView(UIView *view) {
 
 static BOOL isContextMenuCutoutShadow(UIView *view) {
     return isExactClass(view, @"_UICutoutShadowView") &&
-           isExactClass(view.superview, @"_UIContextMenuListView");
+           isExactClass(view.superview, ctxListClassName());
 }
 
 static void hideContextMenuSeparators(UIView *root) {
@@ -209,7 +225,7 @@ static void injectGlassIntoContextEffectView(UIVisualEffectView *fx, int attempt
     UIView *container = fx.contentView;
     if (contextMenuNeedsLegacyInsetWorkaround()) {
         container = fx;
-        while (container && !isExactClass(container, @"_UIContextMenuListView")) container = container.superview;
+        while (container && !isExactClass(container, ctxListClassName())) container = container.superview;
         if (!container) return;
     }
     // springboard sometimes gives us zero-ish bounds for a bit
@@ -222,13 +238,16 @@ static void injectGlassIntoContextEffectView(UIVisualEffectView *fx, int attempt
         return;
     }
 
-    LGLiveBackdropView *glass = objc_getAssociatedObject(fx, kCtxGlassKey);
+    // the iOS 13 list holds one effect view per action section, so the glass
+    // belongs to the list there instead of to each effect view
+    id glassOwner = ctxUsesActionsListView() ? (id)container : (id)fx;
+    LGLiveBackdropView *glass = objc_getAssociatedObject(glassOwner, kCtxGlassKey);
     if (!glass) {
         glass = LGCreateRegisteredGlass(container.bounds, nil, @"ContextMenu");
         if (!glass) return;
         glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [container insertSubview:glass atIndex:0];
-        objc_setAssociatedObject(fx, kCtxGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(glassOwner, kCtxGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (glass.superview != container) [container insertSubview:glass atIndex:0];
     glass.frame                = contextMenuVisualBounds(container);
@@ -547,7 +566,7 @@ static void ctxScheduleLayoutProbe(UIView *listView) {
     if (!isInsideContextMenu(self_)) return;
     if (!lgHostEnabled(@"ContextMenu")) { restoreContextMenuSubtree(self_); return; }
     setBackdropHiddenInEffectView(self_);
-    if (!hasAncestorOfClassName(self_, @"_UIContextMenuListView")) return;
+    if (!hasAncestorOfClassName(self_, ctxListClassName())) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (self_.window) injectGlassIntoContextEffectView((UIVisualEffectView *)self_, 0);
@@ -559,7 +578,7 @@ static void ctxScheduleLayoutProbe(UIView *listView) {
     if (!isInsideContextMenu(self_)) return;
     if (!lgHostEnabled(@"ContextMenu")) { restoreContextMenuSubtree(self_); return; }
     setBackdropHiddenInEffectView(self_);
-    if (hasAncestorOfClassName(self_, @"_UIContextMenuListView"))
+    if (hasAncestorOfClassName(self_, ctxListClassName()))
         injectGlassIntoContextEffectView((UIVisualEffectView *)self_, 10);
 }
 %end
@@ -569,7 +588,7 @@ static void ctxScheduleLayoutProbe(UIView *listView) {
     %orig;
     UIView *self_ = (UIView *)self;
     if (!isContextMenuReusableGapView(self_)) return;
-    if (!hasAncestorOfClassName(self_, @"_UIContextMenuListView")) return;
+    if (!hasAncestorOfClassName(self_, ctxListClassName())) return;
     if (!lgHostEnabled(@"ContextMenu")) { restoreContextMenuSubtree(self_); return; }
     styleContextMenuReusableGapView(self_);
 }
@@ -577,7 +596,7 @@ static void ctxScheduleLayoutProbe(UIView *listView) {
     %orig;
     UIView *self_ = (UIView *)self;
     if (!isContextMenuReusableGapView(self_)) return;
-    if (!hasAncestorOfClassName(self_, @"_UIContextMenuListView")) return;
+    if (!hasAncestorOfClassName(self_, ctxListClassName())) return;
     if (lgHostEnabled(@"ContextMenu")) styleContextMenuReusableGapView(self_);
     else restoreContextMenuSubtree(self_);
 }
@@ -586,7 +605,7 @@ static void ctxScheduleLayoutProbe(UIView *listView) {
 %hook UICollectionView
 - (void)layoutSubviews {
     %orig;
-    if (hasAncestorOfClassName((UIView *)self, @"_UIContextMenuListView") && lgHostEnabled(@"ContextMenu"))
+    if (hasAncestorOfClassName((UIView *)self, ctxListClassName()) && lgHostEnabled(@"ContextMenu"))
         hideContextMenuSeparators((UIView *)self);
 }
 %end

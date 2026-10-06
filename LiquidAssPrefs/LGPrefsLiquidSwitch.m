@@ -596,10 +596,12 @@ static void LGSettingsSwitchScheduleAutoContract(LGPrefsLiquidSwitch *self_) {
 - (void)updateMaterialColors {
     UIColor *accent = LGSwitchEffectiveAccentColor(self);
     BOOL darkMode = LGSwitchIsDarkMode(self.traitCollection);
-    self.trackView.backgroundColor = LGSwitchOffTrackColor(self.traitCollection);
-    self.fillView.backgroundColor = [accent colorWithAlphaComponent:darkMode ? 0.78 : 0.92];
+    // colors go straight to the layers: theming tweaks that rewrite
+    // -[UIView setBackgroundColor:] (Noctis and friends) otherwise blank them
+    self.trackView.layer.backgroundColor = LGSwitchOffTrackColor(self.traitCollection).CGColor;
+    self.fillView.layer.backgroundColor = [accent colorWithAlphaComponent:darkMode ? 0.78 : 0.92].CGColor;
 
-    self.contractedThumbView.backgroundColor = UIColor.whiteColor;
+    self.contractedThumbView.layer.backgroundColor = UIColor.whiteColor.CGColor;
     self.contractedThumbView.layer.shadowColor = UIColor.blackColor.CGColor;
     self.contractedThumbView.layer.shadowOpacity = 0.12;
     self.contractedThumbView.layer.shadowRadius = 5.0;

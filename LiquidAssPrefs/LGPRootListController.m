@@ -1,4 +1,5 @@
 #import "LGPRootListController.h"
+#import "../Shared/LGLegacyCompat.h"
 #import "LGPSurfaceController.h"
 #import "LGPrefsSurfaceCatalog.h"
 #import "LGPrefsDataSupport.h"
@@ -262,12 +263,12 @@
     toggle.onTintColor = [UIColor systemBlueColor];
     toggle.on = [self isGlobalEnabled];
     self.lg_globalToggle = toggle;
-    [toggle addAction:[UIAction actionWithHandler:^(__kindof UIAction * _Nonnull action) {
-        UISwitch *sender = (UISwitch *)action.sender;
+    LGAddControlHandler(toggle, UIControlEventValueChanged, ^(__kindof UIControl *lgSender) {
+        UISwitch *sender = (UISwitch *)lgSender;
         LGWritePreferenceAndMaybeRequireRespring(@"Global.Enabled", @(sender.isOn));
         [self updateMenuAvailability];
         [self updateRespringBarAnimated:YES];
-    }] forControlEvents:UIControlEventValueChanged];
+    });
 
     UIView *headerRow = [[UIView alloc] initWithFrame:CGRectZero];
     headerRow.translatesAutoresizingMaskIntoConstraints = NO;

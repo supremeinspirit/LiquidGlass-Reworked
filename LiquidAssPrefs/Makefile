@@ -5,7 +5,7 @@ BUNDLE_NAME = LiquidAssPrefs
 LG_PACKAGE_VERSION := $(shell sed -n 's/^Version: //p' ../control | head -n 1)
 
 PREF_LOCAL_FILES := $(wildcard *.m)
-PREF_SHARED_FILES := ../Shared/LGSharedSupport.m ../Shared/LGLiveBackdropView.m ../Shared/LGFramework.m
+PREF_SHARED_FILES := ../Shared/LGSharedSupport.m ../Shared/LGLiveBackdropView.m ../Shared/LGFramework.m ../Shared/LGLegacyCompat.m
 LiquidAssPrefs_FILES = $(PREF_LOCAL_FILES) $(PREF_SHARED_FILES)
 LiquidAssPrefs_FRAMEWORKS = UIKit QuartzCore CoreText CoreGraphics CoreMotion
 LiquidAssPrefs_INSTALL_PATH = /Library/PreferenceBundles
@@ -15,6 +15,8 @@ LiquidAssPrefs_LDFLAGS += -undefined dynamic_lookup
 else
 LiquidAssPrefs_PRIVATE_FRAMEWORKS = Preferences
 LiquidAssPrefs_EXTRA_FRAMEWORKS += AltList
+LiquidAssPrefs_CFLAGS += -F$(LG_DEPS_DIR)
+LiquidAssPrefs_LDFLAGS += -F$(LG_DEPS_DIR)
 endif
 ifeq ($(THEOS_PACKAGE_SCHEME),roothide)
 LiquidAssPrefs_CFLAGS += -F$(THEOS)/lib/iphone/rootless

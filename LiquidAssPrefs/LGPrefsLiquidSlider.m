@@ -541,7 +541,7 @@ static UIColor *LGSliderInactiveTrackColor(UITraitCollection *traitCollection) {
     if (self.contractedThumbView) return;
     UIView *thumb = [[UIView alloc] initWithFrame:CGRectZero];
     thumb.userInteractionEnabled = NO;
-    thumb.backgroundColor = LGSliderIdleThumbColor(self.traitCollection);
+    thumb.layer.backgroundColor = LGSliderIdleThumbColor(self.traitCollection).CGColor;
     thumb.layer.shadowColor = UIColor.blackColor.CGColor;
     thumb.layer.shadowOpacity = 0.12;
     thumb.layer.shadowRadius = 5.0;
@@ -571,15 +571,15 @@ static UIColor *LGSliderInactiveTrackColor(UITraitCollection *traitCollection) {
 
 - (void)updateThumbMaterialColors {
     BOOL darkMode = LGSliderIsDarkMode(self.traitCollection);
-    self.contractedThumbView.backgroundColor = LGSliderIdleThumbColor(self.traitCollection);
+    self.contractedThumbView.layer.backgroundColor = LGSliderIdleThumbColor(self.traitCollection).CGColor;
     self.contractedThumbView.layer.shadowOpacity = 0.12;
     self.contractedThumbView.layer.shadowRadius = 5.0;
     self.glassThumbView.layer.shadowOpacity = darkMode ? 0.12 : 0.08;
     self.glassThumbView.layer.shadowRadius = darkMode ? 7.0 : 4.0;
     self.glassThumbView.layer.shadowOffset = darkMode ? CGSizeMake(0.0, 2.0) : CGSizeMake(0.0, 1.0);
     self.glassThumbView.layer.shadowColor = UIColor.blackColor.CGColor;
-    self.magneticFillView.backgroundColor = self.liquidAccentColor ?: LGSliderEffectiveAccentColor(self);
-    self.trackBackgroundView.backgroundColor = self.liquidTrackColor ?: LGSliderInactiveTrackColor(self.traitCollection);
+    self.magneticFillView.layer.backgroundColor = (self.liquidAccentColor ?: LGSliderEffectiveAccentColor(self)).CGColor;
+    self.trackBackgroundView.layer.backgroundColor = (self.liquidTrackColor ?: LGSliderInactiveTrackColor(self.traitCollection)).CGColor;
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {

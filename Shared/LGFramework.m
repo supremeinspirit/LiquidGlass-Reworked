@@ -1,4 +1,5 @@
 #import "LGFramework.h"
+#import "LGLegacyCompat.h"
 #import <objc/message.h>
 
 @implementation LGAdjustableBlurView
@@ -470,8 +471,7 @@ static void LGDumpButtonHierarchy(UIView *view) {
             [self addSubview:self.menuAnchorButton];
             [self bringSubviewToFront:self.menuAnchorButton];
         }
-        self.menuAnchorButton.menu = menu;
-        self.menuAnchorButton.showsMenuAsPrimaryAction = YES;
+        LGSetButtonPrimaryMenu(self.menuAnchorButton, menu);
     } else {
         [self.menuAnchorButton removeFromSuperview];
         self.menuAnchorButton = nil;
@@ -501,10 +501,7 @@ static void LGDumpButtonHierarchy(UIView *view) {
 
 - (void)presentMenu {
     if (!self.primaryMenu) return;
-    if (self.menuAnchorButton && self.menuAnchorButton.contextMenuInteraction && [self.menuAnchorButton.contextMenuInteraction respondsToSelector:@selector(_presentMenuAtLocation:)]) {
-        CGPoint center = CGPointMake(CGRectGetMidX(self.menuAnchorButton.bounds), CGRectGetMidY(self.menuAnchorButton.bounds));
-        ((void (*)(id, SEL, CGPoint))objc_msgSend)(self.menuAnchorButton.contextMenuInteraction, @selector(_presentMenuAtLocation:), center);
-    }
+    LGPresentButtonPrimaryMenu(self.menuAnchorButton);
 }
 
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {

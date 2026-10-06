@@ -582,6 +582,8 @@ int LGResolve_EdgeInfoVtableSlot(void * const *vtable, int maxSlots) {
             if (ins == 0xAA0503F7u) savesEdge = true;
             if (ins == 0xAA0603F4u) savesFlag = true;
             if (ins == 0x2D0002E1u) writesEdge = true;
+            // iOS 13: str s1, [x23] / str s0, [x23, #4]
+            if (ins == 0xBD0002E1u && fn[k + 1] == 0xBD0006E0u) writesEdge = true;
             if (ins == 0x39000288u) writesFlag = true;
             if (ins == 0xD65F03C0u || ins == 0xD65F0FFFu) break;
         }

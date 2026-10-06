@@ -1,12 +1,12 @@
 Package: dylv.liquidass
-Name: Liquid (Gl)ass
-Version: 0.1.1-2b
+Name: Liquid (Gl)ass Reworked
+Version: 0.1.1-2b+ios13.8
 Architecture: iphoneos-arm
-Description: next level diarrhea
-Maintainer: dylv
-Author: dylv
+Description: Liquid (Gl)ass Reworked - rootful iOS 13 port of Liquid (Gl)ass by dylv (winaviation-tweaks)
+Maintainer: supremeinspirit
+Author: dylv (original tweak), supremeinspirit (iOS 13 port)
 Section: Tweaks
-Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 14.0), firmware (<< 26.0), preferenceloader, com.opa334.altlist
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 13.0), firmware (<< 26.0), preferenceloader, com.opa334.altlist
 Icon: https://winaviation.github.io/repo/depictions/dylv.liquidass/icon.png
 Replaces: dylv.blurless
 Conflicts: dylv.blurless

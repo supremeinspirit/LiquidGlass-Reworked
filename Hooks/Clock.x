@@ -240,6 +240,10 @@ static NSString *LGClockCustomDateString(void) {
     static NSDateFormatter *formatter;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ formatter = [NSDateFormatter new]; });
+    static NSString *cached;
+    static CFTimeInterval cachedAt;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (cached && now - cachedAt < 1.0) return cached;
     formatter.locale = [NSLocale autoupdatingCurrentLocale];
     formatter.timeZone = [NSTimeZone localTimeZone];
     NSString *format = LG_prefString(@"Lockscreen.Clock.DateFormat.Format", nil);
@@ -251,7 +255,9 @@ static NSString *LGClockCustomDateString(void) {
     while ([text containsString:@"  "]) {
         text = [text stringByReplacingOccurrencesOfString:@"  " withString:@" "];
     }
-    return [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    cached = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    cachedAt = now;
+    return cached;
 }
 
 static void LGClockApplyDateText(UILabel *label) {
@@ -272,6 +278,27 @@ static void LGClockApplyDateText(UILabel *label) {
     objc_setAssociatedObject(label, kLastCustom, custom ? desired : nil,
                              OBJC_ASSOCIATION_COPY_NONATOMIC);
     if (!desired.length || [label.text isEqualToString:desired]) return;
+
+    // On the stock iOS 13 lock screen the subtitle view writes its own string
+    // back during layout, and changing the text asks for another layout. If
+    // the label keeps reverting, let the system's text win instead of
+    // re-applying forever inside one layout pass (that hung SpringBoard).
+    static void *kApplyWindowStart = &kApplyWindowStart;
+    static void *kApplyCount = &kApplyCount;
+    CFTimeInterval now = CACurrentMediaTime();
+    CFTimeInterval windowStart =
+        [objc_getAssociatedObject(label, kApplyWindowStart) doubleValue];
+    NSUInteger applies = [objc_getAssociatedObject(label, kApplyCount) unsignedIntegerValue];
+    if (now - windowStart > 1.0) {
+        windowStart = now;
+        applies = 0;
+        objc_setAssociatedObject(label, kApplyWindowStart, @(windowStart),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (applies >= 3) return;
+    objc_setAssociatedObject(label, kApplyCount, @(applies + 1),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
     objc_setAssociatedObject(label, kApplying, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     label.text = desired;
     objc_setAssociatedObject(label, kApplying, nil, OBJC_ASSOCIATION_ASSIGN);
@@ -307,6 +334,29 @@ static UIView *LGClockLegacyHostInWindow(UIWindow *window) {
     return LGClockFindLegacyHostInView(window);
 }
 
+// The legacy lock screen re-runs layout whenever its subviews are moved or
+// reordered. If our adjustments and the system's keep undoing each other the
+// main thread never leaves the layout pass (SpringBoard hangs, backboardd hits
+// its watchdog), so the hooks stand down once a pass repeats this often.
+static BOOL LGClockLegacyLayoutBudgetAvailable(void) {
+    // Passes are counted per main run loop turn: ordinary animation lays the
+    // date view out every frame, but each frame is its own turn. Only a pass
+    // that never returns to the run loop can reach the limit.
+    static NSUInteger passes;
+    static BOOL resetScheduled;
+    if (!resetScheduled) {
+        resetScheduled = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            passes = 0;
+            resetScheduled = NO;
+        });
+    }
+    if (++passes <= 200) return YES;
+    if (passes == 201)
+        LGLog(@"[clock] legacy layout repeated 200 times in one run loop turn; standing down");
+    return NO;
+}
+
 static void LGClockPositionLegacyDateSubtitle(UIView *clockHost) {
     if (!clockHost || !LGClockIsLegacyHost(clockHost) || !clockHost.superview) return;
     UIView *subtitle = LGClockFindDescendantNamed(clockHost, @"SBFLockScreenDateSubtitleDateView");
@@ -328,8 +378,19 @@ static void LGClockPositionLegacyDateSubtitle(UIView *clockHost) {
     CGRect subtitleFrame = [container convertRect:subtitle.frame fromView:subtitle.superview];
     subtitleFrame.origin.x = round(CGRectGetMidX(clockFrame) - CGRectGetWidth(subtitleFrame) * 0.5);
     subtitleFrame.origin.y = round(CGRectGetMinY(clockFrame) - CGRectGetHeight(subtitleFrame) + 10.0);
-    subtitle.frame = [subtitle.superview convertRect:subtitleFrame fromView:container];
-    [subtitle.superview bringSubviewToFront:subtitle];
+    // on notched phones the legacy lock screen date sits partly under the
+    // sensor housing, so nudge it down
+    if (container.window.safeAreaInsets.top > 24.0)
+        subtitleFrame.origin.y += round(LG_prefFloat(@"Clock.LegacyDateOffsetY", 7.0));
+    CGRect target = [subtitle.superview convertRect:subtitleFrame fromView:container];
+    CGRect current = subtitle.frame;
+    if (fabs(CGRectGetMinX(current) - CGRectGetMinX(target)) > 0.5 ||
+        fabs(CGRectGetMinY(current) - CGRectGetMinY(target)) > 0.5 ||
+        fabs(CGRectGetWidth(current) - CGRectGetWidth(target)) > 0.5 ||
+        fabs(CGRectGetHeight(current) - CGRectGetHeight(target)) > 0.5)
+        subtitle.frame = target;
+    if (subtitle.superview.subviews.lastObject != subtitle)
+        [subtitle.superview bringSubviewToFront:subtitle];
 }
 
 static BOOL LGClockLooksLikeTime(NSString *text) {
@@ -1413,7 +1474,20 @@ static LGClockState *LGClockStateForHost(UIView *host, BOOL create) {
     return state;
 }
 
+// The legacy date view also hosts the subtitle line (date, "NN % Charged",
+// alarm text). Those labels are never the time; treating them as the time
+// source made the clock adopt their small font.
+static BOOL LGClockIsLegacySubtitleLabel(UILabel *label) {
+    if (!LGClockIsLegacySystem()) return NO;
+    for (UIView *ancestor = label.superview; ancestor; ancestor = ancestor.superview) {
+        if (LGClockIsLegacyHost(ancestor)) return NO;
+        if ([NSStringFromClass(ancestor.class) hasPrefix:@"SBFLockScreenDateSubtitle"]) return YES;
+    }
+    return NO;
+}
+
 static void LGClockSourceFontDidChange(UILabel *label, UIFont *candidate, NSString *reason) {
+    if (LGClockIsLegacySubtitleLabel(label)) return;
     UIView *host = label.superview;
     while (host && !LGClockIsHost(host)) host = host.superview;
     if (!host) return;
@@ -1460,6 +1534,7 @@ static void LGClockSourceFontDidChange(UILabel *label, UIFont *candidate, NSStri
 }
 
 static void LGClockSourceTextDidChange(UILabel *label) {
+    if (LGClockIsLegacySubtitleLabel(label)) return;
     UIView *host = label.superview;
     while (host && !LGClockIsHost(host)) host = host.superview;
     if (!host) {
@@ -1712,6 +1787,7 @@ static void LGPublishArtworkRect(UIView *artworkView) {
     %orig;
     UIView *host = (UIView *)self;
     if (LGClockIsLegacySystem()) {
+        if (!LGClockLegacyLayoutBudgetAvailable()) return;
         LGClockApplyDateTextInView(host);
         LGClockPositionLegacyDateSubtitle(host);
     }
@@ -1732,6 +1808,7 @@ static void LGPublishArtworkRect(UIView *artworkView) {
 - (void)layoutSubviews {
     %orig;
     if (LGClockIsLegacySystem()) {
+        if (!LGClockLegacyLayoutBudgetAvailable()) return;
         LGClockApplyDateTextInView((UIView *)self);
         UIView *host = ((UIView *)self).superview;
         while (host && !LGClockIsLegacyHost(host)) host = host.superview;

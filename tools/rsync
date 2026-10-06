@@ -1,0 +1,28 @@
+#!/var/jb/bin/sh
+# Minimal stand-in for the `rsync -a src... dest/ [--exclude x]...` calls Theos
+# makes; rsync isn't installed on this device. Options may come in any order.
+set --  "$@" --end--
+positional=""
+count=0
+while [ "$1" != "--end--" ]; do
+	case "$1" in
+		--exclude) shift ;;
+		--exclude=*|-*) ;;
+		*) count=$((count + 1)); eval "arg$count=\$1" ;;
+	esac
+	shift
+done
+[ "$count" -ge 2 ] || exit 0
+eval "dest=\$arg$count"
+mkdir -p "$dest"
+i=1
+while [ "$i" -lt "$count" ]; do
+	eval "src=\$arg$i"
+	case "$src" in
+		*/) cp -a "$src." "$dest" ;;
+		*) cp -a "$src" "$dest" ;;
+	esac
+	i=$((i + 1))
+done
+find "$dest" \( -name .DS_Store -o -name '._*' \) -exec rm -f {} + 2>/dev/null
+exit 0

@@ -335,6 +335,18 @@ typedef void (*Render14Fn)(void*,
                            void*,
                            void*,
                            float*);
+typedef void (*Render13LegacyFn)(void*,
+                                 void*,
+                                 void*,
+                                 void*,
+                                 float,
+                                 void*,
+                                 float,
+                                 float,
+                                 float,
+                                 void*,
+                                 void*,
+                                 float*);
 typedef void     (*StopEncodersFn)(void*);
 typedef uint32_t (*InternAtomFn)(const char*);
 typedef void     (*AddFilterFn)(uint32_t, void*);
@@ -347,6 +359,7 @@ static InternAtomFn    g_internAtom     = nullptr;
 static AddFilterFn     g_addFilter      = nullptr;
 static Render13Fn      g_origGaussR13   = nullptr; // original render we call after our pass
 static Render14Fn      g_origGaussR14   = nullptr;
+static Render13LegacyFn g_origGaussR13Legacy = nullptr; // iOS 13 float pair ABI
 static IdentityFn      g_origGaussIdentity = nullptr;
 static EdgeInfoFn      g_origGaussEdgeInfo = nullptr;
 static void           *g_gaussCtxValue  = nullptr; // raw gaussian vtable ptr (stripped)
@@ -360,6 +373,7 @@ static MSHookFunctionFn g_hookFunction = nullptr;
 static bool             g_useHookPath = false;
 static bool             g_gaussianHooksInstalled = false;
 static bool             g_legacyRenderABI = false;
+static bool             g_floatPairRenderABI = false;
 static bool             g_skipGaussianIdentityHook = false;
 static bool             g_skipGaussianEdgeHook = false;
 static bool             g_skipGaussianRenderHook = false;
@@ -1524,7 +1538,11 @@ static void ourCustomRender13(void *self, void *filter, void *layer, void *ctx,
     }
 
     R13TRACE("R13[%llu] before g_origGaussR13(%p)", callN, (void *)g_origGaussR13);
-    if (g_inLegacyRender && g_origGaussR14) {
+    if (g_inLegacyRender && g_origGaussR13Legacy) {
+        g_origGaussR13Legacy(self, filter, layer, ctx, opacity, surface,
+                             0.0f, g_legacyRenderOffset.x, g_legacyRenderOffset.y,
+                             cm, shape, out);
+    } else if (g_inLegacyRender && g_origGaussR14) {
         g_origGaussR14(self, filter, layer, ctx, opacity, surface,
                        0.0f, g_legacyRenderOffset, cm, shape, out);
     } else if (g_origGaussR13) {
@@ -1726,6 +1744,31 @@ static void ourGaussianRender14Hook(void *self, void *filter, void *layer, void 
     }
 }
 
+static void ourGaussianRender13LegacyHook(void *self, void *filter, void *layer, void *ctx,
+                                          float opacity, void *surface, float scale,
+                                          float offsetX, float offsetY, void *cm,
+                                          void *shape, float *out) {
+    uint32_t atom = filter
+        ? *(uint32_t *)((uint8_t *)filter + g_filterAtomOffset) : 0;
+    if (lgIsCustomAtom(atom)) {
+        static int loggedCustomDispatch = 0;
+        if (__sync_bool_compare_and_swap(&loggedCustomDispatch, 0, 1)) {
+            lglog("hook: first iOS 13 custom render atom=0x%x self=%p filter=%p",
+                  atom, self, filter);
+        }
+        g_inLegacyRender = true;
+        g_legacyRenderOffset = simd_make_float2(offsetX, offsetY);
+        ourCustomRender13(self, filter, layer, ctx, opacity, surface,
+                          scale, false, cm, shape, out);
+        g_inLegacyRender = false;
+        return;
+    }
+    if (g_origGaussR13Legacy) {
+        g_origGaussR13Legacy(self, filter, layer, ctx, opacity, surface,
+                             scale, offsetX, offsetY, cm, shape, out);
+    }
+}
+
 static int ourGaussianIdentityHook(void *self, void *filter) {
     uint32_t atom = filter
         ? *(uint32_t *)((uint8_t *)filter + g_filterAtomOffset) : 0;
@@ -1855,7 +1898,9 @@ static bool lgInstallGaussianHooks(void *identityEntry, void *edgeInfoEntry,
     void *target = LGSymStripCode(renderEntry);
     void *trampoline = nullptr;
     if (g_skipGaussianRenderHook) {
-        if (g_legacyRenderABI)
+        if (g_floatPairRenderABI)
+            g_origGaussR13Legacy = (Render13LegacyFn)LGSymMakeCallable(renderEntry);
+        else if (g_legacyRenderABI)
             g_origGaussR14 = (Render14Fn)LGSymMakeCallable(renderEntry);
         else
             g_origGaussR13 = (Render13Fn)LGSymMakeCallable(renderEntry);
@@ -1864,20 +1909,26 @@ static bool lgInstallGaussianHooks(void *identityEntry, void *edgeInfoEntry,
                    lgGaussianIdentityFingerprint(target),
                    kLGGaussianHookProbe)) {
         g_skipGaussianRenderHook = true;
-        if (g_legacyRenderABI)
+        if (g_floatPairRenderABI)
+            g_origGaussR13Legacy = (Render13LegacyFn)LGSymMakeCallable(renderEntry);
+        else if (g_legacyRenderABI)
             g_origGaussR14 = (Render14Fn)LGSymMakeCallable(renderEntry);
         else
             g_origGaussR13 = (Render13Fn)LGSymMakeCallable(renderEntry);
         lglog("hook: render probe state unavailable; skipping hook");
     } else {
-        void *replacement = LGSymStripCode(g_legacyRenderABI
+        void *replacement = LGSymStripCode(g_floatPairRenderABI
+            ? (void *)&ourGaussianRender13LegacyHook
+            : g_legacyRenderABI
             ? (void *)&ourGaussianRender14Hook
             : (void *)&ourGaussianRenderHook);
         lglog("hook: installing Gaussian render target=%p replacement=%p",
               target, replacement);
         g_hookFunction(target, replacement, &trampoline);
         lgRemoveGaussianIdentityState();
-        if (g_legacyRenderABI)
+        if (g_floatPairRenderABI)
+            g_origGaussR13Legacy = (Render13LegacyFn)LGSymMakeCallable(trampoline);
+        else if (g_legacyRenderABI)
             g_origGaussR14 = (Render14Fn)LGSymMakeCallable(trampoline);
         else
             g_origGaussR13 = (Render13Fn)LGSymMakeCallable(trampoline);
@@ -1885,9 +1936,11 @@ static bool lgInstallGaussianHooks(void *identityEntry, void *edgeInfoEntry,
     lglog("hook: Gaussian trampolines identity=%p edge=%p renderRaw=%p render=%p ABI=%s",
           (void *)g_origGaussIdentity, (void *)g_origGaussEdgeInfo,
           trampoline,
-          g_legacyRenderABI ? (void *)g_origGaussR14 : (void *)g_origGaussR13,
-          g_legacyRenderABI ? "Vec2" : "bool");
-    return g_legacyRenderABI ? g_origGaussR14 != nullptr
+          g_floatPairRenderABI ? (void *)g_origGaussR13Legacy
+              : g_legacyRenderABI ? (void *)g_origGaussR14 : (void *)g_origGaussR13,
+          g_floatPairRenderABI ? "float pair" : g_legacyRenderABI ? "Vec2" : "bool");
+    return g_floatPairRenderABI ? g_origGaussR13Legacy != nullptr
+         : g_legacyRenderABI ? g_origGaussR14 != nullptr
                              : g_origGaussR13 != nullptr;
 }
 
@@ -2131,6 +2184,7 @@ static void tweakInit(void) {
     g_skipGaussianRenderHook = false;
     g_osMajorVersion = osv.majorVersion;
     g_legacyRenderABI = osv.majorVersion <= 14;
+    g_floatPairRenderABI = osv.majorVersion <= 13;
     lglog("===== LiquidGlass (backboardd) on iOS %ld.%ld.%ld =====",
           (long)osv.majorVersion, (long)osv.minorVersion, (long)osv.patchVersion);
 
@@ -2138,7 +2192,12 @@ static void tweakInit(void) {
 
     g_sourceTextureOffset = osv.majorVersion >= 17 ? 0x60 : 0x58;
     g_destinationTextureOffset = osv.majorVersion >= 17 ? 0x60 : 0x58;
-    if (osv.majorVersion == 16)
+    if (osv.majorVersion <= 13) {
+        // iOS 13.3 MetalContext::blur_surface: [ctx, #0xf0] -> surface, [surface, #0x60] -> texture
+        g_sourceTextureOffset = 0x60;
+        g_destinationTextureOffset = 0x60;
+        g_contextDestSurfaceOffset = 0xf0;
+    } else if (osv.majorVersion == 16)
         g_contextDestSurfaceOffset = 0x110;
     else if (osv.majorVersion == 15 || osv.majorVersion >= 18)
         g_contextDestSurfaceOffset = 0x108;
