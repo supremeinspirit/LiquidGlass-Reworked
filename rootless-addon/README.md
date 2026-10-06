@@ -30,13 +30,17 @@ Opt-in (create the file to turn it on):
 
 | File | Effect |
 | --- | --- |
-| `clear-widget-page-material` | hides the material behind the widget page's list. Off by default: the one time it ran, `backboardd` was killed for exceeding its memory limit a few seconds later (cause not established) |
+| `clear-widget-page-material` | hides the material behind the widget page's list (with an empty layer mask). Off by default: the soft shadow it gives the widget page is part of the look, and an earlier build that hid it through its alpha had `backboardd` killed for exceeding its memory limit a few seconds later (cause not established) |
 
 ## One-time preference defaults
 
 At the first SpringBoard start after installing, on every iOS version, the add-on writes these into the Liquid (Gl)ass preferences, only for keys that are not set yet:
 
 - `DarkTintColor` = clear for Widgets, ContextMenu, Alerts, Banner, Spotlight, Passcode and Keyboard (the original tints these 12-50 % black in dark mode)
-- the list of widgets whose own background is removed gets `com.apple.stocks.widget` added
+- the list of widgets whose own background is removed gets `com.apple.stocks.widget` and `com.apple.Batteries.BatteriesAvocadoWidgetExtension` added
 
-Both can be changed afterwards in the Liquid (Gl)ass settings; they are not applied a second time.
+These can be changed afterwards in the Liquid (Gl)ass settings; they are not applied a second time.
+
+## No refraction at all (only blur and tint)
+
+The original tweak writes `/var/mobile/Library/Accessibility/liquidass-gaussian-identity-state.bin` while it installs its `backboardd` hooks and removes it afterwards. If `backboardd` dies in that moment the file stays, and from then on the renderer skips all its hooks: every surface is only blurred, nothing refracts. Moving the file away and restarting `backboardd` brought the refraction back on both test phones (iOS 17.3 and iOS 15.2.1). If the file comes back, the hook installation really crashes on that system.

@@ -26,7 +26,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v59"
+#define BUILD_TAG "v61"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -1031,9 +1031,18 @@ static void installHooks(int (*hook)(const char *, const char *), const char *wh
 
 #pragma mark - widgets drawn smaller than their slot (widget page left of the home screen)
 
-// iOS 17 renders the widgets of the widget page (the ones that may also appear on the lock screen) in a way the
-// stock background removal does not catch: they kept their opaque background and covered the glass behind them.
-// Ask the system itself to leave the background out for those. Kill switch: CTLDIR/no-widget-background
+// iOS 17 renders the widgets of the widget page in a way the stock background removal does not catch (Calendar
+// kept its whole background, Screen Time half of it) and they covered the glass behind them. Ask the system
+// itself to leave the background out: for every widget on the widget page, and elsewhere for those that may
+// also appear on the lock screen. Kill switch: CTLDIR/no-widget-background
+static BOOL widgetIsOnWidgetPage(UIView *content) {
+	Class listClass = objc_getClass("SBIconListView");
+	int depth = 0;
+	for (UIView *v = [content superview]; v && depth < 24; v = [v superview], depth++)
+		if (listClass && [v isKindOfClass:listClass]) return !strcmp(cname([v superview]), "UIStackView");
+	return NO;
+}
+
 static void widgetBackgroundUpdate(UIView *content) {
 	id vc = nil;
 	@try {
@@ -1044,21 +1053,33 @@ static void widgetBackgroundUpdate(UIView *content) {
 	if (!vc || ![vc respondsToSelector:getSel] || ![vc respondsToSelector:setSel] || ![vc respondsToSelector:secureSel]) return;
 	const void *key = KEY("lgfix_widgetBackground");
 	BOOL mine = objc_getAssociatedObject(vc, key) != nil;
+	BOOL secure = ((BOOL (*)(id, SEL))objc_msgSend)(vc, secureSel);
+	BOOL onPage = widgetIsOnWidgetPage(content);
 	BOOL want = access(CTLDIR "/no-widget-background", F_OK) != 0 && resolveLiquidAss() && pHostEnabled(S("Widgets")) &&
-	            ((BOOL (*)(id, SEL))objc_msgSend)(vc, secureSel);
+	            (secure || onPage);
 	unsigned long long policy = ((unsigned long long (*)(id, SEL))objc_msgSend)(vc, getSel);
 	// 2 = background removed without the widget changing its layout, 0 = the default
 	unsigned long long target = want ? 2 : 0;
 	if (policy == target || (!want && !mine)) return;
 	if (want && policy != 0 && !mine) return;   // someone else chose a policy
 	objc_setAssociatedObject(vc, key, want ? vc : nil, OBJC_ASSOCIATION_ASSIGN);
+	const char *bundle = "?";
+	@try {
+		id widget = [vc respondsToSelector:sel_registerName("widget")] ? ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("widget")) : nil;
+		id name = [widget respondsToSelector:sel_registerName("extensionBundleIdentifier")]
+			? ((id (*)(id, SEL))objc_msgSend)(widget, sel_registerName("extensionBundleIdentifier")) : nil;
+		if ([name isKindOfClass:[NSString class]]) bundle = [(NSString *)name UTF8String];
+	} @catch (id e) {}
+	char label[160];
+	snprintf(label, sizeof(label), "%s page=%d lock=%d", bundle ? bundle : "?", onPage, secure);
+	NSString *labelString = S(label);
 	__weak id weakController = vc;
 	dispatch_async(dispatch_get_main_queue(), ^{
 		id controller = weakController;
 		if (!controller) return;
 		@try {
 			((void (*)(id, SEL, unsigned long long))objc_msgSend)(controller, setSel, target);
-			flog("widget: background policy -> %llu", target);
+			flog("widget: background policy -> %llu (%s)", target, [labelString UTF8String]);
 		} @catch (id e) { flog("widget: background policy threw"); }
 	});
 }
@@ -1100,43 +1121,46 @@ static void widgetFillWalk(UIView *view, Class cls, int depth) {
 }
 
 // The widget page puts a material behind its whole widget list (and, one level up, behind the page). The glass
-// samples what is behind it, so that material shows up as a tint on every widget. Hiding the list's material is
-// opt-in (CTLDIR/clear-widget-page-material): the one time it ran by default, backboardd hit its memory limit.
+// samples what is behind it, so that material shows as a soft dark veil around the widgets. That is part of the
+// look; hiding it is opt-in (CTLDIR/clear-widget-page-material) and done with an empty mask, not alpha: the
+// system writes alpha back, and the one build that fought over it had backboardd killed for memory.
+static BOOL widgetPageMaterialAllowed(void) {
+	return access(CTLDIR "/clear-widget-page-material", F_OK) == 0;
+}
+
+static void widgetPageSetMaterialMasked(UIView *material, BOOL masked, const char *what) {
+	const void *key = KEY("lgfix_widgetPageMaterial"), *countKey = KEY("lgfix_widgetPageMaterialCount");
+	BOOL mine = objc_getAssociatedObject(material, key) != nil;
+	CALayer *layer = [material layer];
+	if (masked) {
+		if ([layer mask]) return;
+		// someone removing the mask again must not turn into a per-frame fight
+		long count = [objc_getAssociatedObject(material, countKey) longValue];
+		if (count >= 20) return;
+		objc_setAssociatedObject(material, countKey, [NSNumber numberWithLong:count + 1], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		[layer setMask:[CALayer layer]];
+		if (!mine) flog("widget page: %s material masked %.0fx%.0f", what, [material bounds].size.width, [material bounds].size.height);
+		objc_setAssociatedObject(material, key, material, OBJC_ASSOCIATION_ASSIGN);
+	} else if (mine) {
+		[layer setMask:nil];
+		objc_setAssociatedObject(material, key, nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+}
+
 static void widgetPageMaterialUpdate(UIView *list) {
 	if (strcmp(cname([list superview]), "UIStackView")) return;   // only the widget page's list
 	Class materialClass = objc_getClass("MTMaterialView");
 	if (!materialClass) return;
-	BOOL clear = access(CTLDIR "/clear-widget-page-material", F_OK) == 0 && resolveLiquidAss() && pHostEnabled(S("Widgets"));
-	const void *key = KEY("lgfix_widgetPageMaterial");
-	for (UIView *sub in [list subviews]) {
-		if (![sub isKindOfClass:materialClass]) continue;
-		BOOL mine = objc_getAssociatedObject(sub, key) != nil;
-		if (clear && [sub alpha] > 0.01) {
-			[sub setAlpha:0.0];
-			if (!mine) flog("widget page: list material cleared");
-			objc_setAssociatedObject(sub, key, sub, OBJC_ASSOCIATION_ASSIGN);
-		} else if (!clear && mine) {
-			[sub setAlpha:1.0];
-			objc_setAssociatedObject(sub, key, nil, OBJC_ASSOCIATION_ASSIGN);
-		}
-	}
+	BOOL clear = resolveLiquidAss() && pHostEnabled(S("Widgets")) && widgetPageMaterialAllowed();
+	for (UIView *sub in [list subviews])
+		if ([sub isKindOfClass:materialClass]) widgetPageSetMaterialMasked(sub, clear, "list");
 	// Optional second step for testing: the page's own full-screen material (CTLDIR/widget-page-clear-backdrop)
 	BOOL clearPage = clear && access(CTLDIR "/widget-page-clear-backdrop", F_OK) == 0;
 	int depth = 0;
 	for (UIView *v = [list superview]; v && depth < 8; v = [v superview], depth++) {
 		if (strcmp(cname(v), "SBFFocusIsolationView")) continue;
-		for (UIView *sub in [v subviews]) {
-			if (![sub isKindOfClass:materialClass]) continue;
-			BOOL mine = objc_getAssociatedObject(sub, key) != nil;
-			if (clearPage && [sub alpha] > 0.01) {
-				[sub setAlpha:0.0];
-				if (!mine) flog("widget page: page material cleared");
-				objc_setAssociatedObject(sub, key, sub, OBJC_ASSOCIATION_ASSIGN);
-			} else if (!clearPage && mine) {
-				[sub setAlpha:1.0];
-				objc_setAssociatedObject(sub, key, nil, OBJC_ASSOCIATION_ASSIGN);
-			}
-		}
+		for (UIView *sub in [v subviews])
+			if ([sub isKindOfClass:materialClass]) widgetPageSetMaterialMasked(sub, clearPage, "page");
 		break;
 	}
 }
@@ -1214,6 +1238,33 @@ static void darkTintDefaults(void) {
 			flog("widget list: default with Stocks written");
 		}
 		CFRelease(key);
+		CFPreferencesSetAppValue(marker, kCFBooleanTrue, domain);
+		CFPreferencesAppSynchronize(domain);
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+			notify_post("dylv.liquidassprefs/Reload");
+		});
+	} else CFRelease(done);
+	CFRelease(marker);
+
+	// Batteries is not in the stock list either and kept its background on the widget page. Append it once.
+	marker = CFStringCreateWithCString(NULL, "LGFix.WidgetListBatteriesApplied", kCFStringEncodingUTF8);
+	done = CFPreferencesCopyAppValue(marker, domain);
+	if (!done) {
+		CFStringRef key = CFStringCreateWithCString(NULL, "RWB.ThirdPartyBundleIDs", kCFStringEncodingUTF8);
+		CFStringRef batteries = CFStringCreateWithCString(NULL, "com.apple.Batteries.BatteriesAvocadoWidgetExtension", kCFStringEncodingUTF8);
+		CFPropertyListRef chosen = CFPreferencesCopyAppValue(key, domain);
+		if (chosen && CFGetTypeID(chosen) == CFStringGetTypeID() &&
+		    CFStringFind((CFStringRef)chosen, batteries, 0).location == kCFNotFound) {
+			CFMutableStringRef list = CFStringCreateMutableCopy(NULL, 0, (CFStringRef)chosen);
+			CFIndex length = CFStringGetLength(list);
+			if (length > 0 && CFStringGetCharacterAtIndex(list, length - 1) != '\n') CFStringAppendCString(list, "\n", kCFStringEncodingUTF8);
+			CFStringAppend(list, batteries);
+			CFPreferencesSetAppValue(key, list, domain);
+			CFRelease(list);
+			flog("widget list: Batteries appended");
+		}
+		if (chosen) CFRelease(chosen);
+		CFRelease(key); CFRelease(batteries);
 		CFPreferencesSetAppValue(marker, kCFBooleanTrue, domain);
 		CFPreferencesAppSynchronize(domain);
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
