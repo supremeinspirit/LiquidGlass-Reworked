@@ -192,6 +192,33 @@ static void hideContextMenuSeparators(UIView *root) {
 }
 
 static void setBackdropHiddenInEffectView(UIView *effectView) {
+    // iOS 13: the dark material is more than the backdrop (a tint layer in the effect view and the dimming
+    // view of the action group's knockout background), all of it sat on top of the glass as a black veil
+    if (ctxUsesActionsListView() && [effectView isKindOfClass:[UIVisualEffectView class]]) {
+        UIView *content = ((UIVisualEffectView *)effectView).contentView;
+        for (UIView *sub in effectView.subviews) {
+            if (sub == content || [sub isKindOfClass:[LGLiveBackdropView class]] || sub.alpha == 0.0) continue;
+            ctxRememberVisualState(sub);
+            sub.alpha = 0.0;
+        }
+        // the full-screen effect view behind the menu carries a dark colour of its own (seen: 0.09,0.08,0.16 @ 0.21)
+        if (isExactClass(effectView.superview, @"_UIContextMenuContainerView") && effectView.backgroundColor &&
+            CGColorGetAlpha(effectView.backgroundColor.CGColor) > 0.0) {
+            if (!objc_getAssociatedObject(effectView, kCtxGapOriginalBgKey))
+                objc_setAssociatedObject(effectView, kCtxGapOriginalBgKey, effectView.backgroundColor,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            effectView.backgroundColor = UIColor.clearColor;
+        }
+        UIView *knockout = effectView.superview;
+        if (isExactClass(knockout, @"_UIDimmingKnockoutBackdropView")) {
+            for (UIView *sub in knockout.subviews) {
+                if (sub == effectView || [sub isKindOfClass:[LGLiveBackdropView class]] || sub.alpha == 0.0) continue;
+                ctxRememberVisualState(sub);
+                sub.alpha = 0.0;
+            }
+        }
+        return;
+    }
     for (UIView *sub in effectView.subviews) {
         if ([sub isKindOfClass:[LGLiveBackdropView class]]) continue;
         if ([NSStringFromClass(sub.class) containsString:@"Backdrop"]) { ctxRememberVisualState(sub); sub.alpha = 0.0; return; }

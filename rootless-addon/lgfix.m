@@ -6,7 +6,10 @@
 //  - layoutSubviews hook slots with replaceable handlers (a newer build loaded later through the
 //    dev loader takes the handlers over, so fixes can be iterated without a respring)
 //  - volume HUD glass for iOS 17's SBElasticSliderView (stock hooks a class that no longer exists)
-//  - a plain status log (OUTDIR/fix.log); no screen captures, no view dumps
+//  - expanded Control Center slider modules, Dynamic Island glass, cover sheet, widget page
+//  - a plain status log (OUTDIR/fix.log)
+//
+// The fixes were written for iOS 17; on older versions the add-on only applies the clear dark tint defaults.
 //
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/disabled
 
@@ -23,7 +26,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v49"
+#define BUILD_TAG "v59"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -1028,10 +1031,43 @@ static void installHooks(int (*hook)(const char *, const char *), const char *wh
 
 #pragma mark - widgets drawn smaller than their slot (widget page left of the home screen)
 
+// iOS 17 renders the widgets of the widget page (the ones that may also appear on the lock screen) in a way the
+// stock background removal does not catch: they kept their opaque background and covered the glass behind them.
+// Ask the system itself to leave the background out for those. Kill switch: CTLDIR/no-widget-background
+static void widgetBackgroundUpdate(UIView *content) {
+	id vc = nil;
+	@try {
+		vc = ((id (*)(id, SEL, id))objc_msgSend)((id)objc_getClass("UIViewController"), sel_registerName("viewControllerForView:"), content);
+	} @catch (id e) {}
+	SEL getSel = sel_registerName("backgroundViewPolicy"), setSel = sel_registerName("setBackgroundViewPolicy:");
+	SEL secureSel = sel_registerName("canAppearInSecureEnvironment");
+	if (!vc || ![vc respondsToSelector:getSel] || ![vc respondsToSelector:setSel] || ![vc respondsToSelector:secureSel]) return;
+	const void *key = KEY("lgfix_widgetBackground");
+	BOOL mine = objc_getAssociatedObject(vc, key) != nil;
+	BOOL want = access(CTLDIR "/no-widget-background", F_OK) != 0 && resolveLiquidAss() && pHostEnabled(S("Widgets")) &&
+	            ((BOOL (*)(id, SEL))objc_msgSend)(vc, secureSel);
+	unsigned long long policy = ((unsigned long long (*)(id, SEL))objc_msgSend)(vc, getSel);
+	// 2 = background removed without the widget changing its layout, 0 = the default
+	unsigned long long target = want ? 2 : 0;
+	if (policy == target || (!want && !mine)) return;
+	if (want && policy != 0 && !mine) return;   // someone else chose a policy
+	objc_setAssociatedObject(vc, key, want ? vc : nil, OBJC_ASSOCIATION_ASSIGN);
+	__weak id weakController = vc;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		id controller = weakController;
+		if (!controller) return;
+		@try {
+			((void (*)(id, SEL, unsigned long long))objc_msgSend)(controller, setSel, target);
+			flog("widget: background policy -> %llu", target);
+		} @catch (id e) { flog("widget: background policy threw"); }
+	});
+}
+
 // With a grid tweak the widget content is laid out at the home screen's reduced size (315x147) while the widget
 // page keeps full-size slots (364x170): the content sat in the top left corner of its glass. Scale it to fill.
 static void widgetFillUpdate(id object) {
 	UIView *content = object;
+	@try { widgetBackgroundUpdate(content); } @catch (id e) {}
 	UIView *slot = [content superview];
 	if (!slot) return;
 	const void *key = KEY("lgfix_widgetFill");
@@ -1063,9 +1099,52 @@ static void widgetFillWalk(UIView *view, Class cls, int depth) {
 	for (UIView *sub in [view subviews]) widgetFillWalk(sub, cls, depth + 1);
 }
 
+// The widget page puts a material behind its whole widget list (and, one level up, behind the page). The glass
+// samples what is behind it, so that material shows up as a tint on every widget. Hiding the list's material is
+// opt-in (CTLDIR/clear-widget-page-material): the one time it ran by default, backboardd hit its memory limit.
+static void widgetPageMaterialUpdate(UIView *list) {
+	if (strcmp(cname([list superview]), "UIStackView")) return;   // only the widget page's list
+	Class materialClass = objc_getClass("MTMaterialView");
+	if (!materialClass) return;
+	BOOL clear = access(CTLDIR "/clear-widget-page-material", F_OK) == 0 && resolveLiquidAss() && pHostEnabled(S("Widgets"));
+	const void *key = KEY("lgfix_widgetPageMaterial");
+	for (UIView *sub in [list subviews]) {
+		if (![sub isKindOfClass:materialClass]) continue;
+		BOOL mine = objc_getAssociatedObject(sub, key) != nil;
+		if (clear && [sub alpha] > 0.01) {
+			[sub setAlpha:0.0];
+			if (!mine) flog("widget page: list material cleared");
+			objc_setAssociatedObject(sub, key, sub, OBJC_ASSOCIATION_ASSIGN);
+		} else if (!clear && mine) {
+			[sub setAlpha:1.0];
+			objc_setAssociatedObject(sub, key, nil, OBJC_ASSOCIATION_ASSIGN);
+		}
+	}
+	// Optional second step for testing: the page's own full-screen material (CTLDIR/widget-page-clear-backdrop)
+	BOOL clearPage = clear && access(CTLDIR "/widget-page-clear-backdrop", F_OK) == 0;
+	int depth = 0;
+	for (UIView *v = [list superview]; v && depth < 8; v = [v superview], depth++) {
+		if (strcmp(cname(v), "SBFFocusIsolationView")) continue;
+		for (UIView *sub in [v subviews]) {
+			if (![sub isKindOfClass:materialClass]) continue;
+			BOOL mine = objc_getAssociatedObject(sub, key) != nil;
+			if (clearPage && [sub alpha] > 0.01) {
+				[sub setAlpha:0.0];
+				if (!mine) flog("widget page: page material cleared");
+				objc_setAssociatedObject(sub, key, sub, OBJC_ASSOCIATION_ASSIGN);
+			} else if (!clearPage && mine) {
+				[sub setAlpha:1.0];
+				objc_setAssociatedObject(sub, key, nil, OBJC_ASSOCIATION_ASSIGN);
+			}
+		}
+		break;
+	}
+}
+
 // Widget views that come back from the recycling pool are not laid out again; catch them when their page lays out
 static void widgetListUpdate(id object) {
 	UIView *list = object;
+	@try { widgetPageMaterialUpdate(list); } @catch (id e) {}
 	const void *key = KEY("lgfix_widgetListPending");
 	if (objc_getAssociatedObject(list, key)) return;
 	objc_setAssociatedObject(list, key, list, OBJC_ASSOCIATION_ASSIGN);
@@ -1079,6 +1158,69 @@ static void widgetListUpdate(id object) {
 			if (widgetClass) widgetFillWalk(strongList, widgetClass, 0);
 		} @catch (id e) {}
 	});
+}
+
+// The stock tweak tints some surfaces black in dark mode (widgets and context menus 30 %, banners 50 %, ...).
+// Make clear the default once, for every key the user has not set. Kill switch: CTLDIR/keep-dark-tints
+static void darkTintDefaults(void) {
+	if (access(CTLDIR "/keep-dark-tints", F_OK) == 0) return;
+	const char *hosts[] = { "Widgets", "ContextMenu", "Alerts", "Banner", "Spotlight", "Passcode", "Keyboard" };
+	CFStringRef domain = CFStringCreateWithCString(NULL, "dylv.liquidassprefs", kCFStringEncodingUTF8);
+	CFStringRef marker = CFStringCreateWithCString(NULL, "LGFix.DarkTintDefaultsApplied", kCFStringEncodingUTF8);
+	CFPropertyListRef done = CFPreferencesCopyAppValue(marker, domain);
+	if (!done) {
+		CFStringRef clear = CFStringCreateWithCString(NULL, "#00000000", kCFStringEncodingUTF8);
+		int changed = 0;
+		for (unsigned i = 0; i < sizeof(hosts) / sizeof(hosts[0]); i++) {
+			char name[64];
+			snprintf(name, sizeof(name), "%s.DarkTintColor", hosts[i]);
+			CFStringRef key = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+			CFPropertyListRef chosen = CFPreferencesCopyAppValue(key, domain);
+			if (chosen) CFRelease(chosen);
+			else { CFPreferencesSetAppValue(key, clear, domain); changed++; }
+			CFRelease(key);
+		}
+		CFRelease(clear);
+		CFPreferencesSetAppValue(marker, kCFBooleanTrue, domain);
+		CFPreferencesAppSynchronize(domain);
+		flog("dark tint defaults: %d keys set to clear", changed);
+		// the renderer reads the plist file; give cfprefsd time to write it
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+			notify_post("dylv.liquidassprefs/Reload");
+		});
+	} else CFRelease(done);
+	CFRelease(marker);
+
+	// The stock list of widgets whose own background is removed lacks Stocks: with the dark tint gone it was the
+	// only widget left with a (black) background. Add it once, unless the user edited the list.
+	marker = CFStringCreateWithCString(NULL, "LGFix.WidgetListDefaultApplied", kCFStringEncodingUTF8);
+	done = CFPreferencesCopyAppValue(marker, domain);
+	if (!done) {
+		CFStringRef key = CFStringCreateWithCString(NULL, "RWB.ThirdPartyBundleIDs", kCFStringEncodingUTF8);
+		CFPropertyListRef chosen = CFPreferencesCopyAppValue(key, domain);
+		if (chosen) CFRelease(chosen);
+		else {
+			CFStringRef list = CFStringCreateWithCString(NULL,
+				"com.apple.mobiletimer.WorldClockWidget\ncom.apple.mobilecal.CalendarWidgetExtension\n"
+				"com.apple.mobilemail.MailWidgetExtension\n"
+				"com.apple.ScreenTimeWidgetApplication.ScreenTimeWidgetExtension\n"
+				"com.apple.reminders.WidgetExtension\ncom.apple.weather.widget\ncom.apple.Fitness.FitnessWidget\n"
+				"com.apple.Passbook.PassbookWidgets\ncom.apple.Health.Sleep.SleepWidgetExtension\n"
+				"com.apple.tips.TipsSwift\ncom.apple.Music.MusicWidgets\ncom.apple.gamecenter.widgets.extension\n"
+				"com.apple.tv.TVWidgetExtension\ncom.apple.news.widget\ncom.apple.Maps.GeneralMapsWidget\n"
+				"com.apple.stocks.widget", kCFStringEncodingUTF8);
+			CFPreferencesSetAppValue(key, list, domain);
+			CFRelease(list);
+			flog("widget list: default with Stocks written");
+		}
+		CFRelease(key);
+		CFPreferencesSetAppValue(marker, kCFBooleanTrue, domain);
+		CFPreferencesAppSynchronize(domain);
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+			notify_post("dylv.liquidassprefs/Reload");
+		});
+	} else CFRelease(done);
+	CFRelease(domain); CFRelease(marker);
 }
 
 static void registerRuntime(void) {
@@ -1096,6 +1238,10 @@ __attribute__((constructor)) static void lgfixInit(void) {
 	if (getenv("LGFIX_SELFTEST")) return;
 	if (access(CTLDIR "/disabled", F_OK) == 0) return;
 	mkdir(OUTDIR, 0755);
+	// a preference default, not a hook: applies on every iOS version (once per process, by the first build)
+	if (!dlsym(RTLD_DEFAULT, "lgfix_register") || dlsym(RTLD_DEFAULT, "lgfix_register") == (void *)lgfix_register)
+		dispatch_async(dispatch_get_main_queue(), ^{ @try { darkTintDefaults(); } @catch (id e) {} });
+	if ([[NSProcessInfo processInfo] operatingSystemVersion].majorVersion < 17) return;
 	setenv("LGFIX_NEWEST", BUILD_TAG, 1);
 
 	// A build that is already in the process owns hooks and notifications; just take its handlers over

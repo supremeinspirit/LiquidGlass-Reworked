@@ -23,3 +23,20 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `no-widget-fill` | widgets on the widget page are not scaled to fill their slot |
 | `no-hud-scale` | volume HUD keeps the capture scale derived from Global.Quality |
 | `keep-track` | volume HUD keeps the slider's dark track |
+| `no-widget-background` | widgets on the widget page keep their own background |
+| `keep-dark-tints` | the one-time change of the dark-mode tints to clear is not applied |
+
+Opt-in (create the file to turn it on):
+
+| File | Effect |
+| --- | --- |
+| `clear-widget-page-material` | hides the material behind the widget page's list. Off by default: the one time it ran, `backboardd` was killed for exceeding its memory limit a few seconds later (cause not established) |
+
+## One-time preference defaults
+
+At the first SpringBoard start after installing, on every iOS version, the add-on writes these into the Liquid (Gl)ass preferences, only for keys that are not set yet:
+
+- `DarkTintColor` = clear for Widgets, ContextMenu, Alerts, Banner, Spotlight, Passcode and Keyboard (the original tints these 12-50 % black in dark mode)
+- the list of widgets whose own background is removed gets `com.apple.stocks.widget` added
+
+Both can be changed afterwards in the Liquid (Gl)ass settings; they are not applied a second time.

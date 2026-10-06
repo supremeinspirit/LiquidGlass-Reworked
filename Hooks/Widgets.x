@@ -3,6 +3,7 @@
 #import "../Shared/LGLiveBackdropView.h"
 #import "../Shared/LGGlassKit.h"
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 static const CGFloat kWidgetCornerRadius = 20.2;
 static void *kWidgetGlassKey = &kWidgetGlassKey;
@@ -114,7 +115,102 @@ static void injectWidgetGlass(UIView *container) {
     lgTrackGlass(glass, @"Widgets", nil);
 }
 
+#pragma mark - iOS 13 Today widgets
+
+// iOS 13 has no home screen widgets; its Today widgets (also shown above the 3D Touch menu of an app icon) are
+// WGWidgetPlatterView with dark MTMaterialView backgrounds. Replace those with the widget glass.
+static void *kLegacyPlatterMaterialKey = &kLegacyPlatterMaterialKey;
+
+// Alpha alone did not hold (the materials were back at 1.0 in a hierarchy dump, other tweaks touch them too),
+// so they are also masked with an empty layer.
+static void legacySetMaterialHidden(UIView *material, BOOL hidden) {
+    NSNumber *original = objc_getAssociatedObject(material, kLegacyPlatterMaterialKey);
+    if (hidden) {
+        if (!original)
+            objc_setAssociatedObject(material, kLegacyPlatterMaterialKey, @(material.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (material.alpha != 0.0) material.alpha = 0.0;
+        if (!material.layer.mask) material.layer.mask = [CALayer layer];
+    } else if (original) {
+        material.layer.mask = nil;
+        material.alpha = original.doubleValue;
+        objc_setAssociatedObject(material, kLegacyPlatterMaterialKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    }
+}
+
+static void legacyPlatterSetMaterials(UIView *view, UIView *content, BOOL hidden, NSInteger depth) {
+    Class materialClass = NSClassFromString(@"MTMaterialView");
+    for (UIView *sub in view.subviews) {
+        if (sub == content || [sub isKindOfClass:[LGLiveBackdropView class]]) continue;
+        if (materialClass && [sub isKindOfClass:materialClass]) legacySetMaterialHidden(sub, hidden);
+        else if (depth < 2) legacyPlatterSetMaterials(sub, content, hidden, depth + 1);
+    }
+}
+
+// The Today column has one dark material behind the whole widget list (MTMaterialView next to
+// _WGWidgetListScrollView); every widget glass sampled it, which was the dark veil on all widgets.
+static void legacyListSetMaterialHidden(UIView *platter, BOOL hidden) {
+    Class materialClass = NSClassFromString(@"MTMaterialView");
+    if (!materialClass) return;
+    NSInteger depth = 0;
+    for (UIView *a = platter.superview; a && depth < 8; a = a.superview, depth++) {
+        if (!isExactClass(a, @"_WGWidgetListScrollView")) continue;
+        for (UIView *sibling in a.superview.subviews)
+            if ([sibling isKindOfClass:materialClass]) legacySetMaterialHidden(sibling, hidden);
+        return;
+    }
+}
+
+static void updateLegacyPlatterGlass(UIView *platter) {
+    UIView *content = [platter respondsToSelector:@selector(contentView)]
+        ? [platter valueForKey:@"contentView"] : nil;
+    LGLiveBackdropView *glass = objc_getAssociatedObject(platter, kWidgetGlassKey);
+    if (!lgHostEnabled(@"Widgets") || !platter.window) {
+        legacyPlatterSetMaterials(platter, content, NO, 0);
+        if (platter.window) legacyListSetMaterialHidden(platter, NO);
+        removeWidgetGlass(platter);
+        return;
+    }
+    if (platter.bounds.size.width < 40.0 || platter.bounds.size.height < 20.0) return;
+    if (!glass) {
+        glass = LGCreateRegisteredGlass(platter.bounds, nil, @"Widgets");
+        if (!glass) return;
+        glass.userInteractionEnabled = NO;
+        objc_setAssociatedObject(platter, kWidgetGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (glass.superview != platter) [platter insertSubview:glass atIndex:0];
+    else if (platter.subviews.firstObject != glass) [platter sendSubviewToBack:glass];
+    legacyPlatterSetMaterials(platter, content, YES, 0);
+    legacyListSetMaterialHidden(platter, YES);
+    CGFloat radius = 13.0;
+    SEL radiusSel = NSSelectorFromString(@"_continuousCornerRadius");
+    if ([platter respondsToSelector:radiusSel]) {
+        CGFloat own = ((CGFloat (*)(id, SEL))objc_msgSend)(platter, radiusSel);
+        if (own > 0.0) radius = own;
+    }
+    glass.frame = platter.bounds;
+    glass.layer.cornerRadius  = radius;
+    glass.layer.cornerCurve   = kCACornerCurveContinuous;
+    glass.layer.masksToBounds = YES;
+    [glass applyFilters];
+    lgTrackGlass(glass, @"Widgets", nil);
+}
+
+static NSHashTable<UIView *> *sLegacyPlatters;
+
 #pragma mark - hooks
+
+%hook WGWidgetPlatterView
+- (void)didMoveToWindow {
+    %orig;
+    if (!sLegacyPlatters) sLegacyPlatters = [NSHashTable weakObjectsHashTable];
+    [sLegacyPlatters addObject:(UIView *)self];
+    updateLegacyPlatterGlass((UIView *)self);
+}
+- (void)layoutSubviews {
+    %orig;
+    updateLegacyPlatterGlass((UIView *)self);
+}
+%end
 
 %hook MTMaterialView
 - (void)didMoveToWindow {
@@ -184,3 +280,10 @@ static void injectWidgetGlass(UIView *container) {
     if (host) injectWidgetGlass(host);
 }
 %end
+
+%ctor {
+    %init;
+    lgObservePreferenceReload(^{
+        for (UIView *platter in sLegacyPlatters.allObjects) updateLegacyPlatterGlass(platter);
+    });
+}

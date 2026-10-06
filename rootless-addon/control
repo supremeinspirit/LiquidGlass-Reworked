@@ -1,6 +1,6 @@
 Package: com.supremeinspirit.liquidassreworked
 Name: Liquid (Gl)ass Reworked (rootless add-on)
-Version: 1.0.0
+Version: 1.0.2
 Architecture: iphoneos-arm64
 Description: Fixes and additions for Liquid (Gl)ass 0.1.1b on iOS 17 (volume HUD glass, Dynamic Island glass, Control Center slider modules, cover sheet, widgets). Add-on for the original tweak by dylv (winaviation-tweaks); arm64e only.
 Maintainer: supremeinspirit
