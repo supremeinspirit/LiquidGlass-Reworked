@@ -28,7 +28,7 @@ Only these devices. Everything else is untested.
 | --- | --- | --- | --- | --- |
 | rootful iOS 13 port | iPhone X (iPhone10,6) | 13.3 (17C54) | unc0ver, rootful, Substitute | tested on device |
 | rootless | iPhone 15 Pro Max (iPhone16,2) | 17.3 (21D50) | Dopamine 3.0.10, rootless, ElleKit 1.2 | tested on device |
-| rootless | iPhone 12 (iPhone13,2) | 15.2.1 (19C63) | Dopamine 3.0.9, rootless, ElleKit 1.2 | partly tested, only as original `dylv.liquidass 0.1.1b` + the former add-on |
+| rootless | iPhone 12 (iPhone13,2) | 15.2.1 (19C63) | Dopamine 3.0.9, rootless, ElleKit 1.2 | tested on device (Control Center fixes; the other fixes are iOS 17 only) |
 
 See the release notes for which exact build was tested.
 

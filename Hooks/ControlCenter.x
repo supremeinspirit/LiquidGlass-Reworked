@@ -119,6 +119,8 @@ static BOOL ccIsSliderFillMaterial(UIView *mat) {
     return NO;
 }
 
+static BOOL ccContainerHasWholeSlider(UIView *container);
+
 static CGFloat ccGlassRadiusForMaterial(UIView *mat) {
     if (ccHasSBElasticHierarchy(mat)) return -1.0;
     if (!isExactClass(mat, @"MTMaterialView")) return -1.0;
@@ -139,7 +141,10 @@ static CGFloat ccGlassRadiusForMaterial(UIView *mat) {
         BOOL expanded = (isExactClass(parent, @"CCUIContentModuleContentContainer") ||
                          isExactClass(parent, @"CCUIContentModuleContentContainerView")) &&
                         LGMaterialHasGlass(mat, kGlassKey);
-        return expanded ? mat.layer.cornerRadius : -1.0;
+        if (!expanded) return -1.0;
+        // one big slider (e.g. WhitePointModule): the glass takes the slider's pill shape
+        if (ccContainerHasWholeSlider(parent)) return ccPillRadius(parent);
+        return mat.layer.cornerRadius;
     }
 
     CGFloat w = CGRectGetWidth(mat.bounds), h = CGRectGetHeight(mat.bounds);
@@ -865,10 +870,10 @@ static void ccRefreshContentContainerGlass(UIView *container) {
 
 #pragma mark - expanded module that is one big slider (e.g. WhitePointModule)
 
-// The expanded module container gets a glass with the module radius and the slider inside it a pill glass:
-// two outlines at once ("boxed and round"). Keep the slider's pill and hide the container's glass while the
+// The expanded module container's glass is the slider's only background and has the module radius, while the
+// slider is a pill ("boxed and round"). ccGlassRadiusForMaterial gives that glass the pill radius while the
 // slider fills the whole container.
-static void *kCCWholeSliderGlassHiddenKey = &kCCWholeSliderGlassHiddenKey;
+static void *kCCWholeSliderSettledSizeKey = &kCCWholeSliderSettledSizeKey;
 
 static UIView *ccFindWholeModuleSlider(UIView *view, NSInteger depth) {
     Class cls = NSClassFromString(@"CCUIBaseSliderView") ?: NSClassFromString(@"CCUIContinuousSliderView");
@@ -881,28 +886,29 @@ static UIView *ccFindWholeModuleSlider(UIView *view, NSInteger depth) {
     return nil;
 }
 
-static void ccUpdateWholeSliderContainer(UIView *container) {
-    UIView *glass = nil;
-    for (UIView *sub in container.subviews)
-        if ([sub isKindOfClass:[LGLiveBackdropView class]]) { glass = sub; break; }
-    if (!glass) return;
+static BOOL ccContainerHasWholeSlider(UIView *container) {
     CGSize size = container.bounds.size;
-    BOOL wholeSlider = NO;
-    if (lgHostEnabled(@"ControlCenter") && size.height > 220.0 && size.width > 60.0) {
-        UIView *slider = ccFindWholeModuleSlider(container, 0);
-        if (slider && !slider.hidden) {
-            CGSize s = slider.bounds.size;
-            wholeSlider = fabs(s.width - size.width) < 16.0 && fabs(s.height - size.height) < 16.0;
-        }
-    }
-    BOOL hiddenByMe = objc_getAssociatedObject(container, kCCWholeSliderGlassHiddenKey) != nil;
-    if (wholeSlider) {
-        if (!glass.hidden) glass.hidden = YES;
-        if (!hiddenByMe)
-            objc_setAssociatedObject(container, kCCWholeSliderGlassHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else if (hiddenByMe) {
-        glass.hidden = NO;
-        objc_setAssociatedObject(container, kCCWholeSliderGlassHiddenKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    if (size.height <= 220.0 || size.width <= 60.0) return NO;
+    UIView *slider = ccFindWholeModuleSlider(container, 0);
+    if (!slider || slider.hidden) return NO;
+    CGSize s = slider.bounds.size;
+    return fabs(s.width - size.width) < 16.0 && fabs(s.height - size.height) < 16.0;
+}
+
+// The module is laid out while it still expands and not again at the final size until it is touched.
+// Refresh the glass once more after each size change.
+static void ccUpdateWholeSliderContainer(UIView *container) {
+    CGSize size = container.bounds.size;
+    NSValue *settled = objc_getAssociatedObject(container, kCCWholeSliderSettledSizeKey);
+    if (settled && CGSizeEqualToSize(settled.CGSizeValue, size)) return;
+    objc_setAssociatedObject(container, kCCWholeSliderSettledSizeKey, [NSValue valueWithCGSize:size],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIView *weakContainer = container;
+    for (NSNumber *delay in @[@0.12, @0.4, @0.9]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIView *strong = weakContainer;
+            if (strong.window) ccRefreshContentContainerGlass(strong);
+        });
     }
 }
 

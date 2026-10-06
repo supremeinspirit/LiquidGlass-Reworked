@@ -25,6 +25,10 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `keep-track` | volume HUD keeps the slider's dark track |
 | `no-widget-background` | widgets on the widget page keep their own background |
 | `keep-dark-tints` | the one-time change of the dark-mode tints to clear is not applied |
+| `keep-toggle-white` | switched-on Control Center toggle modules keep their white fill |
+| `no-cc-slider` | iOS 15/16: none of the Control Center fixes are applied |
+| `no-media-glass` | iOS 15/16: the backdrop over the Now Playing module's glass is kept |
+| `keep-media-style` | iOS 17: the Now Playing module keeps its own (dark, clearer) glass variant instead of the one the other modules use |
 
 Opt-in (create the file to turn it on):
 

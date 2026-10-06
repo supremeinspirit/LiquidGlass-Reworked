@@ -26,7 +26,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v61"
+#define BUILD_TAG "v71"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -287,6 +287,8 @@ static void volumeUpdate(id object) {
 // Stock gives the expanded module container a glass with the module radius and the slider inside it a
 // pill glass: two outlines at once. Keep the slider's pill, hide the container's glass while that holds.
 
+static BOOL sLegacyOS;   // iOS 15 and 16
+
 static UIView *directSubviewOfClass(UIView *view, const char *className) {
 	Class cls = objc_getClass(className);
 	if (!cls) return nil;
@@ -306,7 +308,73 @@ static UIView *findSlider(UIView *view, int depth) {
 	return nil;
 }
 
+// iOS 15 and 16: the container's glass is the slider's only background, so it stays. It only gets the slider's
+// pill shape while the slider fills the whole container.
+static void ccPillRound(UIView *view, CGFloat radius) {
+	if (fabs([[view layer] cornerRadius] - radius) <= 0.5) return;
+	setContinuousCorners([view layer], radius);
+	[[view layer] setMasksToBounds:YES];
+	[view setNeedsLayout];
+}
+
+static void ccContainerPillUpdate(id object) {
+	UIView *container = object;
+	CGSize size = [container bounds].size;
+	if (size.height <= 220.0 || size.width <= 60.0) return;
+	UIView *slider = findSlider(container, 0);
+	if (!slider || [slider isHidden]) return;
+	CGSize s = [slider bounds].size;
+	if (fabs(s.width - size.width) >= 16.0 || fabs(s.height - size.height) >= 16.0) return;
+	CGFloat radius = MIN(size.width, size.height) * 0.5;
+	Class glassClass = objc_getClass("LGLiveBackdropView"), materialClass = objc_getClass("MTMaterialView");
+	int glasses = 0, materials = 0;
+	for (UIView *sub in [container subviews]) {
+		if (glassClass && [sub isKindOfClass:glassClass]) { ccPillRound(sub, radius); glasses++; }
+		if (materialClass && [sub isKindOfClass:materialClass]) {
+			ccPillRound(sub, radius);
+			materials++;
+			for (UIView *inner in [sub subviews])
+				if (glassClass && [inner isKindOfClass:glassClass]) { ccPillRound(inner, radius); glasses++; }
+		}
+	}
+	if (!objc_getAssociatedObject(container, KEY("lgfix_kContainerPillKey"))) {
+		objc_setAssociatedObject(container, KEY("lgfix_kContainerPillKey"), container, OBJC_ASSOCIATION_ASSIGN);
+		flog("cc: whole-module slider %.0fx%.0f, pill radius %.0f on %d glass, %d material", size.width, size.height,
+		     radius, glasses, materials);
+	}
+}
+
+// The module is laid out while it still expands and not again at the final size until it is touched.
+// Apply the shape once more after each size change (not on every layout: that made dragging a slider lag).
+static void ccContainerPillSettle(UIView *container) {
+	ccContainerPillUpdate(container);
+	CGSize size = [container bounds].size;
+	NSValue *settled = objc_getAssociatedObject(container, KEY("lgfix_kContainerSettledSizeKey"));
+	if (settled && CGSizeEqualToSize([settled CGSizeValue], size)) return;
+	objc_setAssociatedObject(container, KEY("lgfix_kContainerSettledSizeKey"), [NSValue valueWithCGSize:size],
+	                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	__weak UIView *weakContainer = container;
+	for (int i = 0; i < 4; i++) {
+		int64_t ms = i == 0 ? 120 : i == 1 ? 400 : i == 2 ? 900 : 1500;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+			UIView *strong = weakContainer;
+			if (!strong || ![strong window]) return;
+			@try {
+				// what a touch does: the slider lays out again and the stock tweak rounds its parts
+				UIView *slider = findSlider(strong, 0);
+				[slider setNeedsLayout];
+				[slider layoutIfNeeded];
+				ccContainerPillUpdate(strong);
+			} @catch (id e) {}
+		});
+	}
+}
+
+static void ccMediaStyleUpdate(id object);
+
 static void ccContainerUpdate(id object) {
+	if (sLegacyOS) { ccContainerPillSettle(object); return; }
+	ccMediaStyleUpdate(object);
 	UIView *container = object;
 	UIView *glass = directSubviewOfClass(container, "LGLiveBackdropView");
 	if (!glass) return;
@@ -342,6 +410,151 @@ static void ccSliderUpdate(id object) {
 			return;
 		}
 	}
+}
+
+#pragma mark - Control Center toggles: no white fill when switched on
+
+// A switched-on module (CCUIButtonModuleView) gets a white fill over the whole module. Leave that out, so only
+// the glyph changes to its "on" colour. Kill switch CTLDIR/keep-toggle-white.
+static void ccToggleUpdate(id object) {
+	static int keep = -1;
+	if (keep < 0) keep = access(CTLDIR "/keep-toggle-white", F_OK) == 0;
+	if (keep) return;
+	UIView *fill = ivarObject(object, "_highlightedBackgroundView");
+	if (![fill isKindOfClass:[UIView class]]) return;
+	BOOL want = !resolveLiquidAss() || pHostEnabled(S("ControlCenter"));
+	BOOL masked = objc_getAssociatedObject(fill, KEY("lgfix_kToggleFillMaskKey")) != nil;
+	if (want && !masked) {
+		CALayer *mask = [CALayer layer];
+		[[fill layer] setMask:mask];
+		objc_setAssociatedObject(fill, KEY("lgfix_kToggleFillMaskKey"), mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	} else if (!want && masked) {
+		[[fill layer] setMask:nil];
+		objc_setAssociatedObject(fill, KEY("lgfix_kToggleFillMaskKey"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+}
+
+#pragma mark - Now Playing module on iOS 15 and 16
+
+// The module's platter gets its glass from the stock tweak, but a legacy _UIBackdropView (blur plus a white
+// veil) lies on top of it and hides the glass. Leave that view out while the glass is there.
+// Kill switch CTLDIR/no-media-glass.
+static UIView *findViewOfClass(UIView *view, Class cls, int depth);
+
+static void ccMediaApply(UIView *container) {
+	Class glassClass = objc_getClass("LGLiveBackdropView"), backdropClass = objc_getClass("_UIBackdropView");
+	Class mediaClass = objc_getClass("MRUControlCenterView");
+	if (!glassClass || !backdropClass || !mediaClass || ![container window]) return;
+	UIView *media = findViewOfClass(container, mediaClass, 0);
+	int masked = 0;
+	for (UIView *holder in [media subviews]) {
+		UIView *glass = nil;
+		for (UIView *sub in [holder subviews])
+			if ([sub isKindOfClass:glassClass] && ![sub isHidden]) glass = sub;
+		for (UIView *sub in [holder subviews]) {
+			if (![sub isKindOfClass:backdropClass]) continue;
+			BOOL mine = objc_getAssociatedObject(sub, KEY("lgfix_kMediaBackdropMaskKey")) != nil;
+			if (glass && !mine) {
+				CALayer *mask = [CALayer layer];
+				[[sub layer] setMask:mask];
+				objc_setAssociatedObject(sub, KEY("lgfix_kMediaBackdropMaskKey"), mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				masked++;
+			} else if (!glass && mine) {
+				[[sub layer] setMask:nil];
+				objc_setAssociatedObject(sub, KEY("lgfix_kMediaBackdropMaskKey"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			}
+		}
+	}
+	if (masked) flog("media: backdrop over the module glass left out (%d)", masked);
+}
+
+static void ccMediaUpdate(id object) {
+	static int off = -1;
+	if (off < 0) off = access(CTLDIR "/no-media-glass", F_OK) == 0;
+	if (off || !resolveLiquidAss() || !pHostEnabled(S("ControlCenter"))) return;
+	Class containerClass = objc_getClass("CCUIContentModuleContainerView");
+	UIView *container = nil;
+	for (UIView *v = object; v && containerClass; v = [v superview])
+		if ([v isKindOfClass:containerClass]) { container = v; break; }
+	if (!container || ![container window]) return;
+	if (objc_getAssociatedObject(container, KEY("lgfix_kMediaPendingKey"))) return;
+	objc_setAssociatedObject(container, KEY("lgfix_kMediaPendingKey"), container, OBJC_ASSOCIATION_ASSIGN);
+	__weak UIView *weakContainer = container;
+	// after the stock tweak had its turn on the material
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+		UIView *strong = weakContainer;
+		if (!strong) return;
+		objc_setAssociatedObject(strong, KEY("lgfix_kMediaPendingKey"), nil, OBJC_ASSOCIATION_ASSIGN);
+		@try { ccMediaApply(strong); } @catch (id e) {}
+	});
+}
+
+#pragma mark - Now Playing module on iOS 17: same glass variant as the other modules
+
+static UIView *findViewDeep(UIView *view, Class cls, int depth) {
+	if (!view || depth > 40) return nil;
+	if ([view isKindOfClass:cls]) return view;
+	for (UIView *sub in [view subviews]) {
+		UIView *found = findViewDeep(sub, cls, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
+// The Now Playing module forces the dark interface style on its views, so its glass picked the ".dark" variant
+// (clear dark tint) while every other module shows the light variant (white tint): it looked more transparent
+// than the rest. Give its glass the interface style the glass of the other modules has.
+// Kill switch CTLDIR/keep-media-style.
+static int ccMediaStyleWalk(UIView *view, Class glassClass, NSInteger style, int depth) {
+	if (!view || depth > 8) return 0;
+	int changed = 0;
+	for (UIView *sub in [view subviews]) {
+		if ([sub isKindOfClass:glassClass]) {
+			if ([sub overrideUserInterfaceStyle] != style) { [sub setOverrideUserInterfaceStyle:style]; changed++; }
+		} else changed += ccMediaStyleWalk(sub, glassClass, style, depth + 1);
+	}
+	return changed;
+}
+
+static void ccMediaStyleApply(UIView *media) {
+	Class glassClass = objc_getClass("LGLiveBackdropView");
+	Class moduleClass = objc_getClass("CCUIContentModuleContainerView"), mediaClass = object_getClass(media);
+	if (!glassClass || !moduleClass || ![media window]) return;
+	// reference: the glass of a neighbouring module (remembered while the module is expanded on its own)
+	static NSInteger sStyle = UIUserInterfaceStyleUnspecified;
+	UIView *module = media;
+	while (module && ![module isKindOfClass:moduleClass]) module = [module superview];
+	for (UIView *other in [[module superview] subviews]) {
+		if (other == module || ![other isKindOfClass:moduleClass] || findViewDeep(other, mediaClass, 30)) continue;
+		UIView *glass = findViewDeep(other, glassClass, 20);
+		if (!glass) continue;
+		sStyle = [[glass traitCollection] userInterfaceStyle];
+		break;
+	}
+	if (sStyle != UIUserInterfaceStyleLight && sStyle != UIUserInterfaceStyleDark) return;
+	int changed = ccMediaStyleWalk(media, glassClass, sStyle, 0);
+	if (changed) flog("media: %d glass set to the style of the other modules (%ld)", changed, (long)sStyle);
+}
+
+static void ccMediaStyleUpdate(id object) {
+	static int keep = -1;
+	if (keep < 0) keep = access(CTLDIR "/keep-media-style", F_OK) == 0;
+	if (keep || sLegacyOS) return;
+	Class mediaClass = objc_getClass("MRUControlCenterView");
+	if (!mediaClass) return;
+	UIView *media = [object isKindOfClass:mediaClass] ? object : directSubviewOfClass(object, "MRUControlCenterView");
+	if (!media) return;
+	@try { ccMediaStyleApply(media); } @catch (id e) {}
+	// the stock tweak may create the glass after this layout
+	if (objc_getAssociatedObject(media, KEY("lgfix_kMediaStylePendingKey"))) return;
+	objc_setAssociatedObject(media, KEY("lgfix_kMediaStylePendingKey"), media, OBJC_ASSOCIATION_ASSIGN);
+	__weak UIView *weakMedia = media;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+		UIView *strong = weakMedia;
+		if (!strong) return;
+		objc_setAssociatedObject(strong, KEY("lgfix_kMediaStylePendingKey"), nil, OBJC_ASSOCIATION_ASSIGN);
+		@try { ccMediaStyleApply(strong); } @catch (id e) {}
+	});
 }
 
 #pragma mark - Dynamic Island as the "pill HUD" (ringer / silent mode etc. on island phones)
@@ -1006,6 +1219,8 @@ static void registerHandlers(void (*reg)(const char *, LGFixHandler)) {
 	reg("volume", volumeUpdate);
 	reg("cc.container", ccContainerUpdate);
 	reg("cc.slider", ccSliderUpdate);
+	reg("cc.toggle", ccToggleUpdate);
+	reg("cc.mediastyle", ccMediaStyleUpdate);
 	reg("island", islandUpdate);
 	reg("island.element", islandElementUpdate);
 	reg("widget.fill", widgetFillUpdate);
@@ -1027,6 +1242,16 @@ static void installHooks(int (*hook)(const char *, const char *), const char *wh
 	     hook("CCUIContentModuleContentContainerView", "cc.container"),
 	     hook("CCUIContinuousSliderView", "cc.slider"),
 	     resolveLiquidAss());
+	flog("%s: toggle=%d mediastyle=%d", why, hook("CCUIButtonModuleView", "cc.toggle"),
+	     hook("MRUControlCenterView", "cc.mediastyle"));
+	@try {
+		Class mediaClass = objc_getClass("MRUControlCenterView");
+		NSArray *windows = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)((id)objc_getClass("UIWindow"),
+		    sel_registerName("allWindowsIncludingInternalWindows:onlyVisibleWindows:"), YES, NO);
+		if (mediaClass)
+			for (UIWindow *window in windows)
+				if (!strncmp(cname(window), "SBControlCenter", 15)) ccMediaStyleUpdate(findViewDeep(window, mediaClass, 0));
+	} @catch (id e) {}
 }
 
 #pragma mark - widgets drawn smaller than their slot (widget page left of the home screen)
@@ -1292,7 +1517,26 @@ __attribute__((constructor)) static void lgfixInit(void) {
 	// a preference default, not a hook: applies on every iOS version (once per process, by the first build)
 	if (!dlsym(RTLD_DEFAULT, "lgfix_register") || dlsym(RTLD_DEFAULT, "lgfix_register") == (void *)lgfix_register)
 		dispatch_async(dispatch_get_main_queue(), ^{ @try { darkTintDefaults(); } @catch (id e) {} });
-	if ([[NSProcessInfo processInfo] operatingSystemVersion].majorVersion < 17) return;
+	if ([[NSProcessInfo processInfo] operatingSystemVersion].majorVersion < 17) {
+		// iOS 15 and 16: the stock hooks cover the volume HUD and there is no island or widget page to fix.
+		// Only the Control Center fixes apply (kill switch CTLDIR/no-cc-slider).
+		if (access(CTLDIR "/no-cc-slider", F_OK) == 0) return;
+		sLegacyOS = YES;
+		if (dlsym(RTLD_DEFAULT, "lgfix_register") != (void *)lgfix_register) return;
+		setenv("LGFIX_NEWEST", BUILD_TAG, 1);
+		lgfix_register("cc.container", ccContainerUpdate);
+		lgfix_register("cc.slider", ccSliderUpdate);
+		lgfix_register("cc.toggle", ccToggleUpdate);
+		lgfix_register("cc.media", ccMediaUpdate);
+		dispatch_async(dispatch_get_main_queue(), ^{
+			flog("init (iOS < 17): hooks container=%d slider=%d",
+			     lgfix_hook_layout("CCUIContentModuleContentContainerView", "cc.container"),
+			     lgfix_hook_layout("CCUIContinuousSliderView", "cc.slider"));
+			flog("init (iOS < 17): toggle=%d media=%d/%d", lgfix_hook_layout("CCUIButtonModuleView", "cc.toggle"),
+			     lgfix_hook_layout("MRUControlCenterView", "cc.media"), lgfix_hook_layout("MRUNowPlayingView", "cc.media"));
+		});
+		return;
+	}
 	setenv("LGFIX_NEWEST", BUILD_TAG, 1);
 
 	// A build that is already in the process owns hooks and notifications; just take its handlers over
