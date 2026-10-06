@@ -1,6 +1,6 @@
 # Liquid(Gl)ass-Reworked
 
-A reworked build of **Liquid (Gl)ass** with a rootful iOS 13 port and a rootless add-on with fixes for iOS 17.
+A reworked build of **Liquid (Gl)ass** with a rootful iOS 13 port and a full rootless package with fixes for iOS 17.
 
 ## Credits
 
@@ -18,7 +18,7 @@ The original tweak is licensed under [CC BY-NC 4.0](LICENSE) (https://creativeco
 | File | For | What it is |
 | --- | --- | --- |
 | `LiquidGlassReworked_<version>_rootful-ios13_iphoneos-arm.deb` | rootful jailbreaks, iOS 13 | the whole tweak (package `dylv.liquidass`), ported to iOS 13, arm64 |
-| `LiquidGlassReworked_<version>_rootless-addon_iphoneos-arm64.deb` | rootless jailbreaks | an add-on (package `com.supremeinspirit.liquidassreworked`) for the original `dylv.liquidass 0.1.1b`, which must be installed; arm64e only |
+| `LiquidGlassReworked_<version>_rootless_iphoneos-arm64.deb` | rootless jailbreaks, iOS 15 and later | the whole tweak (package `dylv.liquidass`): the original 0.1.1b binaries plus the Reworked fixes in one package. Upgrades an installed original in place and replaces the former add-on package `com.supremeinspirit.liquidassreworked`. The fixes only load on arm64e devices (A12 and newer) |
 
 ## Tested on
 
@@ -27,8 +27,8 @@ Only these devices. Everything else is untested.
 | Variant | Device | iOS | Jailbreak | Status |
 | --- | --- | --- | --- | --- |
 | rootful iOS 13 port | iPhone X (iPhone10,6) | 13.3 (17C54) | unc0ver, rootful, Substitute | tested on device |
-| rootless add-on | iPhone 15 Pro Max (iPhone16,2) | 17.3 (21D50) | Dopamine 3.0.10, rootless, ElleKit 1.2, with `dylv.liquidass 0.1.1b` | tested on device |
-| rootless add-on | iPhone 12 (iPhone13,2) | 15.2.1 (19C63) | Dopamine 3.0.9, rootless, ElleKit 1.2, with `dylv.liquidass 0.1.1b` | **not tested** |
+| rootless | iPhone 15 Pro Max (iPhone16,2) | 17.3 (21D50) | Dopamine 3.0.10, rootless, ElleKit 1.2 | tested on device |
+| rootless | iPhone 12 (iPhone13,2) | 15.2.1 (19C63) | Dopamine 3.0.9, rootless, ElleKit 1.2 | partly tested, only as original `dylv.liquidass 0.1.1b` + the former add-on |
 
 See the release notes for which exact build was tested.
 
@@ -45,9 +45,9 @@ The original needs iOS 14. Changes for iOS 13.3:
 
 Not available on iOS 13: App Library, iOS 14 widgets, widget background removal, Spotlight and search pill.
 
-### Rootless add-on ([rootless-addon/](rootless-addon/))
+### Rootless package ([rootless-addon/](rootless-addon/), [rootless-full/](rootless-full/))
 
-For iOS 17 with the original 0.1.1b:
+The original tweak cannot be rebuilt for arm64e on the development phone, so the rootless package contains the unchanged binaries of the original 0.1.1b release plus two extra libraries with the fixes (sources in `rootless-addon/`); `rootless-full/build.sh` puts them together. For iOS 17:
 
 - volume HUD glass (the original hooks a class that no longer exists on iOS 17)
 - Dynamic Island glass while the island is expanded, with its own settings page

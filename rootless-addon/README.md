@@ -1,6 +1,6 @@
-# Liquid(Gl)ass-Reworked: rootless add-on
+# Liquid(Gl)ass-Reworked: rootless fixes
 
-An add-on for the **stock** `dylv.liquidass 0.1.1b` (rootless). It does not replace the original tweak, it is loaded next to it.
+Two libraries that are loaded next to the unchanged binaries of the original `dylv.liquidass 0.1.1b` (rootless). They ship inside the full rootless package (see [../rootless-full/](../rootless-full/)); up to release 1.0 they were a separate add-on package, `com.supremeinspirit.liquidassreworked`, which the full package replaces.
 
 - `lgfix.m` → `LiquidAssFix.dylib`, loaded into SpringBoard
 - `lgprefsfix.m` → `LiquidAssFixPrefs.dylib`, loaded into Settings (adds a "Dynamic Island" page to the Liquid (Gl)ass settings)
@@ -17,7 +17,7 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 
 | File | Effect |
 | --- | --- |
-| `disabled` | the whole add-on does nothing |
+| `disabled` | none of the Reworked fixes do anything |
 | `no-prefs-page` | no "Dynamic Island" settings page |
 | `no-icons-behind` | home screen icons are not kept visible behind the cover sheet glass |
 | `no-widget-fill` | widgets on the widget page are not scaled to fill their slot |
@@ -34,7 +34,7 @@ Opt-in (create the file to turn it on):
 
 ## One-time preference defaults
 
-At the first SpringBoard start after installing, on every iOS version, the add-on writes these into the Liquid (Gl)ass preferences, only for keys that are not set yet:
+At the first SpringBoard start after installing, on every iOS version, the fixes write these into the Liquid (Gl)ass preferences, only for keys that are not set yet:
 
 - `DarkTintColor` = clear for Widgets, ContextMenu, Alerts, Banner, Spotlight, Passcode and Keyboard (the original tints these 12-50 % black in dark mode)
 - the list of widgets whose own background is removed gets `com.apple.stocks.widget` and `com.apple.Batteries.BatteriesAvocadoWidgetExtension` added
