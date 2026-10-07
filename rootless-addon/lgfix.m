@@ -26,7 +26,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v71"
+#define BUILD_TAG "v73"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -48,6 +48,16 @@ static void flog(const char *fmt, ...) {
 	fputc('\n', f);
 	va_end(ap);
 	fclose(f);
+}
+
+// Everything that repeats (per layout, per island expansion, per widget) is only logged with CTLDIR/debug-log
+static BOOL sVerbose;
+#define vlog(...) do { if (sVerbose) flog(__VA_ARGS__); } while (0)
+
+static void logSetup(void) {
+	sVerbose = access(CTLDIR "/debug-log", F_OK) == 0;
+	struct stat st;
+	if (stat(OUTDIR "/fix.log", &st) == 0 && st.st_size > 64 * 1024) truncate(OUTDIR "/fix.log", 0);
 }
 
 #pragma mark - handler registry (owned by the first loaded build)
@@ -223,7 +233,7 @@ static void volumeUpdate(id object) {
 		[glass setUserInteractionEnabled:NO];
 		objc_setAssociatedObject(slider, KEY("lgfix_kVolumeGlassKey"), glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		if (pTrackGlass) pTrackGlass(glass, S("VolumeHUD"), slider);
-		flog("volume: glass created for %s host=%s frame=%.0fx%.0f", class_getName(object_getClass(slider)),
+		vlog("volume: glass created for %s host=%s frame=%.0fx%.0f", class_getName(object_getClass(slider)),
 		     class_getName(object_getClass(host)), frame.size.width, frame.size.height);
 	}
 	if (!vibrance) {
@@ -231,13 +241,6 @@ static void volumeUpdate(id object) {
 		if (cls) vibrance = [[cls alloc] initWithFrame:frame];
 		if (vibrance)
 			objc_setAssociatedObject(slider, KEY("lgfix_kVolumeVibranceKey"), vibrance, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	}
-	// Glass left behind by other builds or the stock tweak in the same host
-	Class glassClass = objc_getClass("LGLiveBackdropView"), vibranceClass = objc_getClass("LGVolumeHUDVibranceView");
-	for (UIView *sub in [[host subviews] copy]) {
-		if (sub == glass || sub == vibrance) continue;
-		if ((glassClass && [sub isKindOfClass:glassClass]) || (vibranceClass && [sub isKindOfClass:vibranceClass]))
-			[sub removeFromSuperview];
 	}
 	if ([glass superview] != host) [host insertSubview:glass aboveSubview:base];
 	if (vibrance && [vibrance superview] != host) [host insertSubview:vibrance aboveSubview:glass];
@@ -339,7 +342,7 @@ static void ccContainerPillUpdate(id object) {
 	}
 	if (!objc_getAssociatedObject(container, KEY("lgfix_kContainerPillKey"))) {
 		objc_setAssociatedObject(container, KEY("lgfix_kContainerPillKey"), container, OBJC_ASSOCIATION_ASSIGN);
-		flog("cc: whole-module slider %.0fx%.0f, pill radius %.0f on %d glass, %d material", size.width, size.height,
+		vlog("cc: whole-module slider %.0fx%.0f, pill radius %.0f on %d glass, %d material", size.width, size.height,
 		     radius, glasses, materials);
 	}
 }
@@ -392,7 +395,7 @@ static void ccContainerUpdate(id object) {
 		if (![glass isHidden]) [glass setHidden:YES];
 		if (!hiddenByMe) {
 			objc_setAssociatedObject(container, KEY("lgfix_kContainerGlassHiddenKey"), glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			flog("cc: container glass hidden for whole-module slider %.0fx%.0f", size.width, size.height);
+			vlog("cc: container glass hidden for whole-module slider %.0fx%.0f", size.width, size.height);
 		}
 	} else if (hiddenByMe) {
 		[glass setHidden:NO];
@@ -439,13 +442,13 @@ static void ccToggleUpdate(id object) {
 // The module's platter gets its glass from the stock tweak, but a legacy _UIBackdropView (blur plus a white
 // veil) lies on top of it and hides the glass. Leave that view out while the glass is there.
 // Kill switch CTLDIR/no-media-glass.
-static UIView *findViewOfClass(UIView *view, Class cls, int depth);
+static UIView *findView(UIView *view, Class cls, int levels);
 
 static void ccMediaApply(UIView *container) {
 	Class glassClass = objc_getClass("LGLiveBackdropView"), backdropClass = objc_getClass("_UIBackdropView");
 	Class mediaClass = objc_getClass("MRUControlCenterView");
 	if (!glassClass || !backdropClass || !mediaClass || ![container window]) return;
-	UIView *media = findViewOfClass(container, mediaClass, 0);
+	UIView *media = findView(container, mediaClass, 6);
 	int masked = 0;
 	for (UIView *holder in [media subviews]) {
 		UIView *glass = nil;
@@ -465,7 +468,7 @@ static void ccMediaApply(UIView *container) {
 			}
 		}
 	}
-	if (masked) flog("media: backdrop over the module glass left out (%d)", masked);
+	if (masked) vlog("media: backdrop over the module glass left out (%d)", masked);
 }
 
 static void ccMediaUpdate(id object) {
@@ -491,11 +494,11 @@ static void ccMediaUpdate(id object) {
 
 #pragma mark - Now Playing module on iOS 17: same glass variant as the other modules
 
-static UIView *findViewDeep(UIView *view, Class cls, int depth) {
-	if (!view || depth > 40) return nil;
+static UIView *findView(UIView *view, Class cls, int levels) {
+	if (!view || levels < 0) return nil;
 	if ([view isKindOfClass:cls]) return view;
 	for (UIView *sub in [view subviews]) {
-		UIView *found = findViewDeep(sub, cls, depth + 1);
+		UIView *found = findView(sub, cls, levels - 1);
 		if (found) return found;
 	}
 	return nil;
@@ -525,15 +528,15 @@ static void ccMediaStyleApply(UIView *media) {
 	UIView *module = media;
 	while (module && ![module isKindOfClass:moduleClass]) module = [module superview];
 	for (UIView *other in [[module superview] subviews]) {
-		if (other == module || ![other isKindOfClass:moduleClass] || findViewDeep(other, mediaClass, 30)) continue;
-		UIView *glass = findViewDeep(other, glassClass, 20);
+		if (other == module || ![other isKindOfClass:moduleClass] || findView(other, mediaClass, 10)) continue;
+		UIView *glass = findView(other, glassClass, 20);
 		if (!glass) continue;
 		sStyle = [[glass traitCollection] userInterfaceStyle];
 		break;
 	}
 	if (sStyle != UIUserInterfaceStyleLight && sStyle != UIUserInterfaceStyleDark) return;
 	int changed = ccMediaStyleWalk(media, glassClass, sStyle, 0);
-	if (changed) flog("media: %d glass set to the style of the other modules (%ld)", changed, (long)sStyle);
+	if (changed) vlog("media: %d glass set to the style of the other modules (%ld)", changed, (long)sStyle);
 }
 
 static void ccMediaStyleUpdate(id object) {
@@ -560,43 +563,14 @@ static void ccMediaStyleUpdate(id object) {
 #pragma mark - Dynamic Island as the "pill HUD" (ringer / silent mode etc. on island phones)
 
 // Phones with a Dynamic Island never show SBRingerPillView / PLPillView: those alerts expand the island.
-// The island is a black blob (a black fill view in a blur+threshold "gooey" container, plus the curtain
-// over the camera cutout). While it is expanded beyond the cutout, hide the black fill and put a
+// The island is a black blob (black fill views next to the curtain over the camera cutout). While it is
+// expanded beyond the cutout, hide the black fill and put a
 // PillHUD glass into the island's container. The cutout itself stays black (it is hardware).
-static __weak UIView *sIslandGooeyView;
+static __weak UIView *sIslandCurtain;
 static __weak UIView *sIslandContainer;
 
-static BOOL layerHasFilterNamed(CALayer *layer, const char *wanted) {
-	for (id filter in [layer filters]) {
-		id name = nil;
-		@try { name = [filter valueForKey:S("name")]; } @catch (id e) {}
-		if (name && !strcmp([[name description] UTF8String], wanted)) return YES;
-	}
-	return NO;
-}
-
-static UIView *findGooeyView(UIView *view, int depth) {
-	if (!view || depth > 5) return nil;
-	if (layerHasFilterNamed([view layer], "alphaThreshold")) return view;
-	for (UIView *sub in [view subviews]) {
-		UIView *found = findGooeyView(sub, depth + 1);
-		if (found) return found;
-	}
-	return nil;
-}
-
-static UIView *findViewOfClass(UIView *view, Class cls, int depth) {
-	if (!view || depth > 6) return nil;
-	if ([view isKindOfClass:cls]) return view;
-	for (UIView *sub in [view subviews]) {
-		UIView *found = findViewOfClass(sub, cls, depth + 1);
-		if (found) return found;
-	}
-	return nil;
-}
-
-static BOOL isOpaqueBlack(UIView *view) {
-	CGColorRef bg = [[view layer] backgroundColor];
+static BOOL layerOpaqueBlack(CALayer *layer) {
+	CGColorRef bg = [layer backgroundColor];
 	if (!bg || CGColorGetAlpha(bg) < 0.9) return NO;
 	const CGFloat *c = CGColorGetComponents(bg);
 	size_t n = CGColorGetNumberOfComponents(bg);
@@ -609,18 +583,13 @@ static BOOL isOpaqueBlack(UIView *view) {
 // it never touches their mask.
 static void islandSetFill(UIView *fill, BOOL hidden, BOOL requireBlack) {
 	if (!fill) return;
-	// alpha set by builds before v26
-	if (objc_getAssociatedObject(fill, KEY("lgfix_kIslandFillHiddenKey"))) {
-		[fill setAlpha:1.0];
-		objc_setAssociatedObject(fill, KEY("lgfix_kIslandFillHiddenKey"), nil, OBJC_ASSOCIATION_ASSIGN);
-	}
 	CALayer *mine = objc_getAssociatedObject(fill, KEY("lgfix_islandMask"));
 	if (hidden) {
-		if (mine || [[fill layer] mask] || (requireBlack && !isOpaqueBlack(fill))) return;
+		if (mine || [[fill layer] mask] || (requireBlack && !layerOpaqueBlack([fill layer]))) return;
 		CALayer *empty = [CALayer layer];
 		[[fill layer] setMask:empty];
 		objc_setAssociatedObject(fill, KEY("lgfix_islandMask"), empty, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		flog("island: %s masked %.0fx%.0f", cname(fill), [fill bounds].size.width, [fill bounds].size.height);
+		vlog("island: %s masked %.0fx%.0f", cname(fill), [fill bounds].size.width, [fill bounds].size.height);
 	} else if (mine) {
 		if ([[fill layer] mask] == mine) [[fill layer] setMask:nil];
 		objc_setAssociatedObject(fill, KEY("lgfix_islandMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -667,11 +636,11 @@ static void islandSetGainMapsHidden(UIView *view, Class gainClass, Class curtain
 // (_SBSystemApertureMagiciansCurtainView) and the body's gain map view (CAGainMapLayer, draws black).
 // The curtain itself stays, it covers the hardware cutout.
 static void islandSetFillsHidden(UIView *window, BOOL hidden) {
-	UIView *curtain = sIslandGooeyView;
+	UIView *curtain = sIslandCurtain;
 	Class curtainClass = objc_getClass("_SBSystemApertureMagiciansCurtainView");
 	Class gainClass = objc_getClass("_SBSystemApertureGainMapView");
 	if (!curtainClass) return;
-	if (!curtain || [curtain window] != window) sIslandGooeyView = curtain = findViewOfClass(window, curtainClass, 0);
+	if (!curtain || [curtain window] != window) sIslandCurtain = curtain = findView(window, curtainClass, 6);
 	for (UIView *blob in [[curtain superview] subviews]) {
 		if (blob == curtain) continue;
 		for (UIView *fill in [blob subviews]) islandSetFill(fill, hidden, YES);
@@ -731,16 +700,6 @@ static UIView *portalSourceView(UIView *portal) {
 	return [delegate isKindOfClass:[UIView class]] ? delegate : nil;
 }
 
-static BOOL layerOpaqueBlack(CALayer *layer) {
-	CGColorRef bg = [layer backgroundColor];
-	if (!bg || CGColorGetAlpha(bg) < 0.9) return NO;
-	const CGFloat *c = CGColorGetComponents(bg);
-	size_t n = CGColorGetNumberOfComponents(bg);
-	for (size_t i = 0; i + 1 < n; i++)
-		if (c[i] > 0.05) return NO;
-	return YES;
-}
-
 // Opaque black layers that span the whole indicator package (its "Root Layer" and state root): the backing
 // the glyph is drawn on. Smaller black layers are part of the glyph and stay.
 static void packageSetBackingCleared(CALayer *layer, CGSize full, BOOL cleared, int depth) {
@@ -751,7 +710,7 @@ static void packageSetBackingCleared(CALayer *layer, CGSize full, BOOL cleared, 
 		[layer setBackgroundColor:[[UIColor clearColor] CGColor]];
 		objc_setAssociatedObject(layer, KEY("lgfix_islandBacking"), layer, OBJC_ASSOCIATION_ASSIGN);
 		const char *name = [[layer name] UTF8String];
-		flog("island: package backing cleared (%s)", name ? name : "?");
+		vlog("island: package backing cleared (%s)", name ? name : "?");
 	} else if (!cleared && mine) {
 		[layer setBackgroundColor:[[UIColor blackColor] CGColor]];
 		objc_setAssociatedObject(layer, KEY("lgfix_islandBacking"), nil, OBJC_ASSOCIATION_ASSIGN);
@@ -782,7 +741,7 @@ static void islandSetPortalKeyed(UIView *transformView, BOOL keyed) {
 			if (!filter) return;
 			[[portal layer] setFilters:[NSArray arrayWithObject:filter]];
 			objc_setAssociatedObject(portal, KEY("lgfix_islandKeyed"), portal, OBJC_ASSOCIATION_ASSIGN);
-			flog("island: black keyed out of %s %.0fx%.0f", cname(portal), [portal bounds].size.width, [portal bounds].size.height);
+			vlog("island: black keyed out of %s %.0fx%.0f", cname(portal), [portal bounds].size.width, [portal bounds].size.height);
 		} else if (!want && mine) {
 			[[portal layer] setFilters:nil];
 			objc_setAssociatedObject(portal, KEY("lgfix_islandKeyed"), nil, OBJC_ASSOCIATION_ASSIGN);
@@ -892,7 +851,7 @@ static void islandUpdate(id object) {
 		if (glass && ![glass isHidden]) {
 			[glass setHidden:YES];
 			CALayer *presentation = [[container layer] presentationLayer];
-			flog("island: stock look restored, model %.0fx%.0f on screen %.0fx%.0f", size.width, size.height,
+			vlog("island: stock look restored, model %.0fx%.0f on screen %.0fx%.0f", size.width, size.height,
 			     presentation ? [presentation bounds].size.width : -1.0, presentation ? [presentation bounds].size.height : -1.0);
 			islandSetFillsHidden(window, NO);
 			islandSetContainerFillsHidden(container, NO);
@@ -908,7 +867,7 @@ static void islandUpdate(id object) {
 		[glass setAutoresizingMask:UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight];
 		objc_setAssociatedObject(container, KEY("lgfix_kIslandGlassKey"), glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		if (pTrackGlass) pTrackGlass(glass, S("PillHUD"), container);
-		flog("island: glass created %.0fx%.0f", size.width, size.height);
+		vlog("island: glass created %.0fx%.0f", size.width, size.height);
 	}
 	CGFloat radius = [[container layer] cornerRadius];
 	if (radius <= 0.0 || radius > MIN(size.width, size.height) * 0.5) radius = MIN(size.width, size.height) * 0.5;
@@ -1067,9 +1026,12 @@ static void iconContentCallOrig(id self, BOOL hidden) {
 	}
 }
 
+static void coverStartTimer(void);
+
 static void iconContentSetHidden(id self, SEL _cmd, BOOL hidden) {
 	sIconContentView = self;
 	if (hidden) {
+		coverStartTimer();
 		BOOL keep = NO;
 		@try { keep = iconsBehindWanted(); } @catch (id e) {}
 		objc_setAssociatedObject(self, KEY("lgfix_iconsWantHidden"), self, OBJC_ASSOCIATION_ASSIGN);
@@ -1081,6 +1043,13 @@ static void iconContentSetHidden(id self, SEL _cmd, BOOL hidden) {
 }
 
 // Follows lock state: the system asked for hidden icons -> hidden while locked, visible while authenticated
+static void coverStopTimer(void) {
+	if (!sCoverTimer) return;
+	dispatch_source_cancel(sCoverTimer);
+	sCoverTimer = nil;
+}
+
+// Runs from the timer. Stops it once there is nothing to follow (the icons are not hidden by the system).
 static void iconContentSync(void) {
 	UIView *view = sIconContentView;
 	if (!view) {
@@ -1088,14 +1057,14 @@ static void iconContentSync(void) {
 		if (!cls) return;
 		for (UIWindow *window in allWindows()) {
 			if (!strstr(cname(window), "HomeScreen")) continue;
-			sIconContentView = view = findViewOfClass(window, cls, 0);
+			sIconContentView = view = findView(window, cls, 6);
 			if (view) break;
 		}
-		if (!view) return;
+		if (!view) { coverStopTimer(); return; }
 		// Found hidden before the hook saw a call: the system wants it hidden
 		if ([view isHidden]) objc_setAssociatedObject(view, KEY("lgfix_iconsWantHidden"), view, OBJC_ASSOCIATION_ASSIGN);
 	}
-	if (!objc_getAssociatedObject(view, KEY("lgfix_iconsWantHidden"))) return;
+	if (!objc_getAssociatedObject(view, KEY("lgfix_iconsWantHidden"))) { coverStopTimer(); return; }
 	BOOL shouldHide = !iconsBehindWanted();
 	if ([view isHidden] != shouldHide) iconContentCallOrig(view, shouldHide);
 }
@@ -1117,33 +1086,25 @@ static void iconContentInstall(void) {
 	flog("icons: setHidden hook installed own=%d", sIconSetHiddenOrig != NULL);
 }
 
-static void coverStartPoll(void) {
+// The timer follows the lock state while the system keeps the icons hidden (cover sheet up); the setHidden:
+// hook starts it, iconContentSync stops it.
+static void coverStartTimer(void) {
 	if (sCoverTimer) return;
-	iconContentInstall();
+	const char *owner = getenv("LGFIX_ICONHOOK");
+	if (!owner || strcmp(owner, BUILD_TAG)) return;
 	sCoverTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
 	dispatch_source_set_timer(sCoverTimer, DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
 	dispatch_source_set_event_handler(sCoverTimer, ^{
-		@try {
-			const char *owner = getenv("LGFIX_ICONHOOK");
-			if (owner && !strcmp(owner, BUILD_TAG)) iconContentSync();
-		} @catch (id e) {}
+		@try { iconContentSync(); } @catch (id e) {}
 	});
 	dispatch_resume(sCoverTimer);
-	flog("cover: poll started");
 }
 
-// Stops the auto-repeat that -increaseVolume / -decreaseVolume (the button-down calls) start. Never call those
-// two from here again: without -cancelVolumeEvent the volume keeps stepping up and down.
-static void volumeCancelRepeat(void) {
-	@try {
-		SEL getter = sel_registerName("volumeControl"), cancel = sel_registerName("cancelVolumeEvent");
-		id app = [UIApplication sharedApplication];
-		id control = [app respondsToSelector:getter] ? ((id (*)(id, SEL))objc_msgSend)(app, getter) : nil;
-		BOOL ok = [control respondsToSelector:cancel];
-		if (ok) ((void (*)(id, SEL))objc_msgSend)(control, cancel);
-		if (ok) [NSObject cancelPreviousPerformRequestsWithTarget:control];
-		flog("volume: repeat cancelled ok=%d", ok);
-	} @catch (id e) { flog("volume: cancel threw"); }
+// Nothing is hooked and no timer runs when the feature is switched off (CTLDIR/no-icons-behind, read at start)
+static void coverStartPoll(void) {
+	if (access(CTLDIR "/no-icons-behind", F_OK) == 0) return;
+	iconContentInstall();
+	coverStartTimer();   // once, for icons that were already hidden before the hook
 }
 
 // For the private test host
@@ -1250,7 +1211,7 @@ static void installHooks(int (*hook)(const char *, const char *), const char *wh
 		    sel_registerName("allWindowsIncludingInternalWindows:onlyVisibleWindows:"), YES, NO);
 		if (mediaClass)
 			for (UIWindow *window in windows)
-				if (!strncmp(cname(window), "SBControlCenter", 15)) ccMediaStyleUpdate(findViewDeep(window, mediaClass, 0));
+				if (!strncmp(cname(window), "SBControlCenter", 15)) ccMediaStyleUpdate(findView(window, mediaClass, 40));
 	} @catch (id e) {}
 }
 
@@ -1304,7 +1265,7 @@ static void widgetBackgroundUpdate(UIView *content) {
 		if (!controller) return;
 		@try {
 			((void (*)(id, SEL, unsigned long long))objc_msgSend)(controller, setSel, target);
-			flog("widget: background policy -> %llu (%s)", target, [labelString UTF8String]);
+			vlog("widget: background policy -> %llu (%s)", target, [labelString UTF8String]);
 		} @catch (id e) { flog("widget: background policy threw"); }
 	});
 }
@@ -1330,7 +1291,7 @@ static void widgetFillUpdate(id object) {
 		t.m42 = (scale - 1.0) * outer.height * 0.5;
 		if (!CATransform3DEqualToTransform([layer sublayerTransform], t)) {
 			[layer setSublayerTransform:t];
-			flog("widget: content %.0fx%.0f scaled %.3f to fill %.0fx%.0f", own.width, own.height, scale, outer.width, outer.height);
+			vlog("widget: content %.0fx%.0f scaled %.3f to fill %.0fx%.0f", own.width, own.height, scale, outer.width, outer.height);
 		}
 		objc_setAssociatedObject(slot, key, slot, OBJC_ASSOCIATION_ASSIGN);
 	} else if (objc_getAssociatedObject(slot, key)) {
@@ -1364,7 +1325,7 @@ static void widgetPageSetMaterialMasked(UIView *material, BOOL masked, const cha
 		if (count >= 20) return;
 		objc_setAssociatedObject(material, countKey, [NSNumber numberWithLong:count + 1], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		[layer setMask:[CALayer layer]];
-		if (!mine) flog("widget page: %s material masked %.0fx%.0f", what, [material bounds].size.width, [material bounds].size.height);
+		if (!mine) vlog("widget page: %s material masked %.0fx%.0f", what, [material bounds].size.width, [material bounds].size.height);
 		objc_setAssociatedObject(material, key, material, OBJC_ASSOCIATION_ASSIGN);
 	} else if (mine) {
 		[layer setMask:nil];
@@ -1514,6 +1475,7 @@ __attribute__((constructor)) static void lgfixInit(void) {
 	if (getenv("LGFIX_SELFTEST")) return;
 	if (access(CTLDIR "/disabled", F_OK) == 0) return;
 	mkdir(OUTDIR, 0755);
+	logSetup();
 	// a preference default, not a hook: applies on every iOS version (once per process, by the first build)
 	if (!dlsym(RTLD_DEFAULT, "lgfix_register") || dlsym(RTLD_DEFAULT, "lgfix_register") == (void *)lgfix_register)
 		dispatch_async(dispatch_get_main_queue(), ^{ @try { darkTintDefaults(); } @catch (id e) {} });

@@ -34,6 +34,7 @@ Opt-in (create the file to turn it on):
 
 | File | Effect |
 | --- | --- |
+| `debug-log` | repeating log lines are written to the fix log too (off by default; the log is cut back when it grows past 64 KB) |
 | `clear-widget-page-material` | hides the material behind the widget page's list (with an empty layer mask). Off by default: the soft shadow it gives the widget page is part of the look, and an earlier build that hid it through its alpha had `backboardd` killed for exceeding its memory limit a few seconds later (cause not established) |
 
 ## One-time preference defaults
