@@ -56,6 +56,8 @@ The original tweak cannot be rebuilt for arm64e on the development phone, so the
 - widgets on the widget page fill their slot when a grid tweak shrinks them
 - widget backgrounds are removed reliably (the original's removal often did not start in the iOS 17 widget renderer)
 
+On every iOS version: keyboard keys take the tweak's key radius and font reliably (the system's cache of drawn keys is emptied when those settings change; the original never empties it, so old and new key shapes got mixed).
+
 ---
 
 # Original README

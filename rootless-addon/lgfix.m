@@ -26,7 +26,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v75"
+#define BUILD_TAG "v76"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -1466,6 +1466,71 @@ static void darkTintDefaults(void) {
 	CFRelease(domain); CFRelease(marker);
 }
 
+// Keyboard: iOS keeps the drawn keys in a system-wide image cache (Library/Caches/com.apple.keyboards) whose keys
+// do not include the tweak's key radius or font, and the stock tweak never empties it: keys drawn before a
+// settings change (or without the tweak) keep their old shape, so one keyboard shows a mix. Empty the cache whenever
+// those settings differ from the ones it was last filled with. Kill switch: CTLDIR/keep-keyboard-cache
+static void keyboardCacheSync(void) {
+	if (access(CTLDIR "/keep-keyboard-cache", F_OK) == 0) return;
+	const char *names[] = { "Global.Enabled", "Keyboard.Enabled", "Keyboard.KeyRadius", "Keyboard.CustomFont.Enabled" };
+	CFStringRef domain = CFStringCreateWithCString(NULL, "dylv.liquidassprefs", kCFStringEncodingUTF8);
+	CFPreferencesAppSynchronize(domain);
+	char now[160] = "";
+	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		CFStringRef key = CFStringCreateWithCString(NULL, names[i], kCFStringEncodingUTF8);
+		CFPropertyListRef value = CFPreferencesCopyAppValue(key, domain);
+		char part[40] = "-";
+		double number = 0;
+		if (value && CFGetTypeID(value) == CFBooleanGetTypeID()) snprintf(part, sizeof(part), "%d", CFBooleanGetValue((CFBooleanRef)value) ? 1 : 0);
+		else if (value && CFGetTypeID(value) == CFNumberGetTypeID() && CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, &number))
+			snprintf(part, sizeof(part), "%.2f", number);
+		if (value) CFRelease(value);
+		CFRelease(key);
+		strlcat(now, part, sizeof(now));
+		strlcat(now, "|", sizeof(now));
+	}
+	CFRelease(domain);
+
+	char before[160] = "";
+	FILE *f = fopen(OUTDIR "/keyboard-cache-state", "r");
+	if (f) {
+		if (!fgets(before, sizeof(before), f)) before[0] = 0;
+		fclose(f);
+		before[strcspn(before, "\r\n")] = 0;
+	}
+	if (!strcmp(before, now)) return;
+
+	Class cacheClass = objc_getClass("UIKeyboardCache");
+	SEL shared = sel_registerName("sharedInstance"), purge = sel_registerName("purge");
+	id cache = cacheClass && [cacheClass respondsToSelector:shared] ? ((id (*)(id, SEL))objc_msgSend)(cacheClass, shared) : nil;
+	BOOL purged = cache && [cache respondsToSelector:purge];
+	if (purged) ((void (*)(id, SEL))objc_msgSend)(cache, purge);
+	Class rendererClass = objc_getClass("UIKBRenderer");
+	SEL clear = sel_registerName("clearInternalCaches");
+	if (rendererClass && [rendererClass respondsToSelector:clear]) ((void (*)(id, SEL))objc_msgSend)(rendererClass, clear);
+	flog("keyboard: settings %s -> %s, key image cache emptied=%d", before[0] ? before : "(none)", now, purged);
+	if (!purged) return;
+	f = fopen(OUTDIR "/keyboard-cache-state", "w");
+	if (f) { fputs(now, f); fclose(f); }
+}
+
+static void keyboardCacheWatch(void) {
+	static int token, generation;
+	notify_register_dispatch("dylv.liquidassprefs/Reload", &token, dispatch_get_main_queue(), ^(int t) {
+		if (!isNewestBuild()) return;
+		// a slider sends many reloads while it is dragged: wait until they stop
+		int mine = ++generation;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+			if (mine != generation) return;
+			@try { keyboardCacheSync(); } @catch (id e) {}
+		});
+	});
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (!isNewestBuild()) return;
+		@try { keyboardCacheSync(); } @catch (id e) {}
+	});
+}
+
 static void registerRuntime(void) {
 	dispatch_async(dispatch_get_main_queue(), ^{ coverStartPoll(); });
 	static int prefsToken;
@@ -1485,6 +1550,8 @@ __attribute__((constructor)) static void lgfixInit(void) {
 	// a preference default, not a hook: applies on every iOS version (once per process, by the first build)
 	if (!dlsym(RTLD_DEFAULT, "lgfix_register") || dlsym(RTLD_DEFAULT, "lgfix_register") == (void *)lgfix_register)
 		dispatch_async(dispatch_get_main_queue(), ^{ @try { darkTintDefaults(); } @catch (id e) {} });
+	// a cache fix, not a hook: applies on every iOS version
+	keyboardCacheWatch();
 	if ([[NSProcessInfo processInfo] operatingSystemVersion].majorVersion < 17) {
 		// iOS 15 and 16: the stock hooks cover the volume HUD and there is no island or widget page to fix.
 		// Only the Control Center fixes apply (kill switch CTLDIR/no-cc-slider).
