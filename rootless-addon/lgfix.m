@@ -26,7 +26,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v73"
+#define BUILD_TAG "v75"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -985,7 +985,13 @@ static dispatch_source_t sCoverTimer;
 
 // iOS 17 hides SBIconContentView while the cover sheet is up and only shows it when the unlock finishes,
 // so the cover sheet glass has nothing but wallpaper behind it. Keep the icons visible while the device is
-// authenticated (never while locked). Kill switch: CTLDIR/no-icons-behind
+// authenticated (never while locked). Off unless CTLDIR/icons-behind exists: the original tweak leaves the
+// icons to the system, and on 17.0.3 this made them (and the widgets with them) blink out for a moment when
+// the notification centre came down. CTLDIR/no-icons-behind still switches it off.
+static BOOL iconsBehindEnabled(void) {
+	return access(CTLDIR "/icons-behind", F_OK) == 0 && access(CTLDIR "/no-icons-behind", F_OK) != 0;
+}
+
 static IMP sIconSetHiddenOrig;
 static __weak UIView *sIconContentView;
 
@@ -1012,7 +1018,7 @@ static BOOL coverSheetVisible(void) {
 
 // Only while the cover sheet is on screen: other reasons the system hides the icons are left alone
 static BOOL iconsBehindWanted(void) {
-	return access(CTLDIR "/no-icons-behind", F_OK) != 0 && resolveLiquidAss() && pHostEnabled(S("CoverSheet")) &&
+	return iconsBehindEnabled() && resolveLiquidAss() && pHostEnabled(S("CoverSheet")) &&
 	       coverSheetVisible() && deviceAuthenticated();
 }
 
@@ -1100,9 +1106,9 @@ static void coverStartTimer(void) {
 	dispatch_resume(sCoverTimer);
 }
 
-// Nothing is hooked and no timer runs when the feature is switched off (CTLDIR/no-icons-behind, read at start)
+// Nothing is hooked and no timer runs unless the feature is switched on (CTLDIR/icons-behind, read at start)
 static void coverStartPoll(void) {
-	if (access(CTLDIR "/no-icons-behind", F_OK) == 0) return;
+	if (!iconsBehindEnabled()) return;
 	iconContentInstall();
 	coverStartTimer();   // once, for icons that were already hidden before the hook
 }

@@ -19,7 +19,7 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | --- | --- |
 | `disabled` | none of the Reworked fixes do anything |
 | `no-prefs-page` | no "Dynamic Island" settings page |
-| `no-icons-behind` | home screen icons are not kept visible behind the cover sheet glass |
+| `icons-behind` | **switches on** (off by default): home screen icons are kept visible behind the cover sheet glass, iOS 17. `no-icons-behind` still switches it off |
 | `no-widget-fill` | widgets on the widget page are not scaled to fill their slot |
 | `no-hud-scale` | volume HUD keeps the capture scale derived from Global.Quality |
 | `keep-track` | volume HUD keeps the slider's dark track |
