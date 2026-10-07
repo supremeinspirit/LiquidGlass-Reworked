@@ -1,6 +1,10 @@
 # Liquid(Gl)ass-Reworked
 
 A reworked build of **Liquid (Gl)ass** with a rootful iOS 13 port and a full rootless package with fixes for iOS 17.
+
+
+
+
 !Note! : The Patch requires you to have LiquidAss 0.1.1-2b installed, and as the name suggests, it will patch the instance with my fixes.
          The reworked arm64 (in the same release as rootful) has everything you need in one .deb (do not install this over liquid glass - this is it's own tweak)
 
