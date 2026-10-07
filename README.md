@@ -47,7 +47,7 @@ Not available on iOS 13: App Library, iOS 14 widgets, widget background removal,
 
 ### Rootless package ([rootless-addon/](rootless-addon/), [rootless-full/](rootless-full/))
 
-The original tweak cannot be rebuilt for arm64e on the development phone, so the rootless package contains the unchanged binaries of the original 0.1.1-2b release plus three extra libraries with the fixes (sources in `rootless-addon/`); `rootless-full/build.sh` puts them together. For iOS 17:
+The original tweak cannot be rebuilt for arm64e on the development phone, so the rootless package contains the unchanged binaries of the original 0.1.1-2b release plus four extra libraries with the fixes (sources in `rootless-addon/`); `rootless-full/build.sh` puts them together. For iOS 17:
 
 - volume HUD glass (the original hooks a class that no longer exists on iOS 17)
 - Dynamic Island glass while the island is expanded, with its own settings page
@@ -56,7 +56,7 @@ The original tweak cannot be rebuilt for arm64e on the development phone, so the
 - widgets on the widget page fill their slot when a grid tweak shrinks them
 - widget backgrounds are removed reliably (the original's removal often did not start in the iOS 17 widget renderer)
 
-On every iOS version: keyboard keys take the tweak's key radius and font reliably (the system's cache of drawn keys is emptied when those settings change; the original never empties it, so old and new key shapes got mixed).
+On every iOS version: keyboard keys take the tweak's key radius and font reliably (the system's cache of drawn keys is emptied when those settings change; the original never empties it, so old and new key shapes got mixed). And in apps the floating tab bar no longer puts all titles on top of each other at its right end when the bar is laid out only once (App Store); the rootful port has the same fix in `Hooks/TabBar.x`.
 
 ---
 

@@ -39,6 +39,7 @@ static const void *kLGTabBarInnerGlowKey = &kLGTabBarInnerGlowKey;
 static const void *kLGTabBarScaleAnimatorKey = &kLGTabBarScaleAnimatorKey;
 static const void *kLGTabBarLumaTimerKey = &kLGTabBarLumaTimerKey;
 static const void *kLGTabBarDarkGlyphsKey = &kLGTabBarDarkGlyphsKey;
+static const void *kLGTabBarRelayoutTriesKey = &kLGTabBarRelayoutTriesKey;
 static const CGFloat kLGTabBarPortraitHighlightHeight = 54.0;
 static const CGFloat kLGTabBarLandscapeHighlightHeight = 46.0;
 static const CGFloat kLGTabBarPortraitLensWidth = 94.0;
@@ -1180,6 +1181,44 @@ static void LGStyleStockTabBar(UITabBar *bar) {
                              OBJC_ASSOCIATION_ASSIGN);
 }
 
+// LGTabBarRemapButtonFrame scales with the stock frames seen so far. In the first layout after the glass
+// exists they arrive one button at a time, so the first button gets the whole pill, the second half of it,
+// and every title ends up at the right end. A bar that is laid out only once keeps that (App Store). When
+// the buttons overlap after a layout, the bar is laid out once more: all stock frames are known by then.
+static void LGRelayoutTabBarIfButtonsOverlap(UITabBar *bar) {
+    if (!bar.window || !LGTabBarAllowed() || !LGIsStockTabBar(bar)) return;
+    if (!objc_getAssociatedObject(bar, kLGTabBarGlassKey)) return;
+
+    BOOL overlap = NO;
+    NSArray<UIView *> *buttons = LGStockTabBarButtons(bar);
+    for (NSUInteger i = 0; i < buttons.count && !overlap; i++) {
+        if (buttons[i].hidden) continue;
+        CGRect first = buttons[i].frame;
+        for (NSUInteger j = i + 1; j < buttons.count; j++) {
+            if (buttons[j].hidden) continue;
+            CGRect second = buttons[j].frame;
+            CGFloat shared = MIN(CGRectGetMaxX(first), CGRectGetMaxX(second)) -
+                             MAX(CGRectGetMinX(first), CGRectGetMinX(second));
+            if (shared > 1.0) {
+                overlap = YES;
+                break;
+            }
+        }
+    }
+    if (!overlap) {
+        if (objc_getAssociatedObject(bar, kLGTabBarRelayoutTriesKey))
+            objc_setAssociatedObject(bar, kLGTabBarRelayoutTriesKey, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    NSInteger tries =
+        [objc_getAssociatedObject(bar, kLGTabBarRelayoutTriesKey) integerValue];
+    if (tries >= 3) return;
+    objc_setAssociatedObject(bar, kLGTabBarRelayoutTriesKey, @(tries + 1),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [bar setNeedsLayout];
+}
+
 static UITabBar *LGTabBarForButton(UIView *button) {
     for (UIView *view = button.superview; view; view = view.superview) {
         if ([view isKindOfClass:[UITabBar class]]) return (UITabBar *)view;
@@ -1849,6 +1888,7 @@ static void LGScheduleTabBarDump(UITabBar *bar, NSString *reason) {
 - (void)layoutSubviews {
     %orig;
     LGStyleStockTabBar(self);
+    LGRelayoutTabBarIfButtonsOverlap(self);
     if (LGTabBarAllowed()) LGStartTabBarLumaSampling(self);
     LGScheduleTabBarDump(self, @"layoutSubviews");
 }
