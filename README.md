@@ -47,13 +47,14 @@ Not available on iOS 13: App Library, iOS 14 widgets, widget background removal,
 
 ### Rootless package ([rootless-addon/](rootless-addon/), [rootless-full/](rootless-full/))
 
-The original tweak cannot be rebuilt for arm64e on the development phone, so the rootless package contains the unchanged binaries of the original 0.1.1-2b release plus two extra libraries with the fixes (sources in `rootless-addon/`); `rootless-full/build.sh` puts them together. For iOS 17:
+The original tweak cannot be rebuilt for arm64e on the development phone, so the rootless package contains the unchanged binaries of the original 0.1.1-2b release plus three extra libraries with the fixes (sources in `rootless-addon/`); `rootless-full/build.sh` puts them together. For iOS 17:
 
 - volume HUD glass (the original hooks a class that no longer exists on iOS 17)
 - Dynamic Island glass while the island is expanded, with its own settings page
 - expanded Control Center modules that are one big slider no longer show two outlines
 - home screen icons stay visible behind the cover sheet glass while unlocked (off by default, switch `icons-behind`)
 - widgets on the widget page fill their slot when a grid tweak shrinks them
+- widget backgrounds are removed reliably (the original's removal often did not start in the iOS 17 widget renderer)
 
 ---
 

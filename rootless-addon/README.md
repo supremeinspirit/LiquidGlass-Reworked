@@ -1,15 +1,16 @@
 # Liquid(Gl)ass-Reworked: rootless fixes
 
-Two libraries that are loaded next to the unchanged binaries of the original `dylv.liquidass 0.1.1-2b` (rootless). They ship inside the full rootless package (see [../rootless-full/](../rootless-full/)); up to release 1.0 they were a separate add-on package, `com.supremeinspirit.liquidassreworked`, which the full package replaces.
+Three libraries that are loaded next to the unchanged binaries of the original `dylv.liquidass 0.1.1-2b` (rootless). They ship inside the full rootless package (see [../rootless-full/](../rootless-full/)); up to release 1.0 they were a separate add-on package, `com.supremeinspirit.liquidassreworked`, which the full package replaces.
 
 - `lgfix.m` → `LiquidAssFix.dylib`, loaded into SpringBoard
 - `lgprefsfix.m` → `LiquidAssFixPrefs.dylib`, loaded into Settings (adds a "Dynamic Island" page to the Liquid (Gl)ass settings)
+- `lgrwbfix.m` → `LiquidAssFixRenderer.dylib`, loaded into the widget renderer processes (it does nothing in `chronod`). On iOS 17 the original's widget background removal often never started there, because the sandboxed renderer got no settings for the tweak; this library hands the settings file's values to the process before the original reads them. It also keeps the original's removal away from widgets the system already draws without background (the widget page), which otherwise lost their content.
 
-Both are written "runtime style" (no `@""` literals, no `@implementation`) because they were built with clang on the phone itself, where compiled Objective-C classes crash on arm64e.
+All three are written "runtime style" (no `@""` literals, no `@implementation`) because they were built with clang on the phone itself, where compiled Objective-C classes crash on arm64e.
 
 ## Build (on device)
 
-`build.sh <tag>` builds `lgfix-<tag>.dylib` (arm64e, ad-hoc signed) and runs a self-test in a private host process outside SpringBoard. The paths in the script are the ones used on the development phone; adjust them. `lgprefsfix.m` is built with the same clang command line.
+`build.sh <tag>` builds `lgfix-<tag>.dylib` (arm64e, ad-hoc signed) and runs a self-test in a private host process outside SpringBoard. The paths in the script are the ones used on the development phone; adjust them. `lgprefsfix.m` is built with the same clang command line; `lgrwbfix.m` too, with only `-framework Foundation -framework CoreFoundation` (self-test symbol `lgrwbfix_selftest`).
 
 ## Switches
 
@@ -24,6 +25,7 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `no-hud-scale` | volume HUD keeps the capture scale derived from Global.Quality |
 | `keep-track` | volume HUD keeps the slider's dark track |
 | `no-widget-background` | widgets on the widget page keep their own background |
+| `no-renderer-fix` | the widget renderer library does nothing (takes effect when the widget renderer next starts) |
 | `keep-dark-tints` | the one-time change of the dark-mode tints to clear is not applied |
 | `keep-toggle-white` | switched-on Control Center toggle modules keep their white fill |
 | `no-cc-slider` | iOS 15/16: none of the Control Center fixes are applied |
