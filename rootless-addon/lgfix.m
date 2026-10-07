@@ -21,12 +21,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <mach-o/getsect.h>
 #include <time.h>
 #include <unistd.h>
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v76"
+#define BUILD_TAG "v81"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -313,21 +314,110 @@ static UIView *findSlider(UIView *view, int depth) {
 
 // iOS 15 and 16: the container's glass is the slider's only background, so it stays. It only gets the slider's
 // pill shape while the slider fills the whole container.
+
+// The original 0.1.1-2b keeps a "desired radius" number on every layer it rounds and its -[CALayer setCornerRadius:]
+// hook replaces any other value with it, so the pill radius never reached the container's material (square
+// background behind a pill slider). Its association key is a static that holds its own address; find it once by
+// looking through the original's __data for such slots and asking the locked layer which one carries a number.
+static const void *sDesiredRadiusKey;
+
+static const void *ccDesiredRadiusKey(CALayer *layer) {
+	if (sDesiredRadiusKey) return sDesiredRadiusKey;
+	static uintptr_t *sSlots;
+	static unsigned long sSlotCount;
+	static BOOL sLooked;
+	if (!sLooked) {
+		sLooked = YES;
+		Dl_info info;
+		// a symbol only the main dylib has (LG_prefBool is in LiquidAssRWB too, which SpringBoard also loads)
+		void *symbol = dlsym(RTLD_DEFAULT, "LGInstallRegisteredGlassInMaterial");
+		if (symbol && dladdr(symbol, &info) && info.dli_fbase) {
+			unsigned long size = 0;
+			uint8_t *data = getsectiondata((const struct mach_header_64 *)info.dli_fbase, "__DATA", "__data", &size);
+			if (data) { sSlots = (uintptr_t *)data; sSlotCount = size / sizeof(uintptr_t); }
+		}
+	}
+	for (unsigned long i = 0; i < sSlotCount; i++) {
+		if (sSlots[i] != (uintptr_t)&sSlots[i]) continue;
+		id value = objc_getAssociatedObject(layer, (const void *)&sSlots[i]);
+		if (value && [value isKindOfClass:[NSNumber class]] && fabs([value doubleValue] - [layer cornerRadius]) <= 0.5) {
+			sDesiredRadiusKey = (const void *)&sSlots[i];
+			flog("cc: the original's radius lock found");
+			break;
+		}
+	}
+	return sDesiredRadiusKey;
+}
+
+// Sets the radius the original insists on for this layer; the value it had is kept for ccPillRelease
+static void ccSetLockedRadius(UIView *view, CGFloat radius) {
+	CALayer *layer = [view layer];
+	const void *key = ccDesiredRadiusKey(layer);
+	if (!key) return;
+	id locked = objc_getAssociatedObject(layer, key);
+	if (![locked isKindOfClass:[NSNumber class]] || fabs([locked doubleValue] - radius) <= 0.5) return;
+	if (!objc_getAssociatedObject(view, KEY("lgfix_kPillPreviousRadiusKey")))
+		objc_setAssociatedObject(view, KEY("lgfix_kPillPreviousRadiusKey"), locked, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(layer, key, [NSNumber numberWithDouble:radius], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static NSString *ccFilterType(UIView *view) {
+	@try {
+		id type = [[[[view layer] filters] firstObject] valueForKey:S("type")];
+		if ([type isKindOfClass:[NSString class]]) return type;
+	} @catch (id e) {}
+	return nil;
+}
+
+// The glass names its filter after its corner radius (".rN") and only picks a new one in applyFilters. The original
+// puts the module radius back on every layout, so the layer could end up as a pill with the module-radius filter
+// still attached (square glass behind a pill slider). Make the filter follow whenever it is not the one that was
+// last chosen for the pill.
+static void ccGlassRefilter(UIView *glass, BOOL changed) {
+	if (![glass respondsToSelector:@selector(applyFilters)]) return;
+	NSString *type = ccFilterType(glass);
+	NSString *chosen = objc_getAssociatedObject(glass, KEY("lgfix_kPillFilterTypeKey"));
+	if (!changed && type && chosen && [type isEqualToString:chosen]) return;
+	((void (*)(id, SEL))objc_msgSend)(glass, @selector(applyFilters));
+	if ([glass respondsToSelector:@selector(updateSpecular)]) ((void (*)(id, SEL))objc_msgSend)(glass, @selector(updateSpecular));
+	objc_setAssociatedObject(glass, KEY("lgfix_kPillFilterTypeKey"), ccFilterType(glass), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static void ccPillRound(UIView *view, CGFloat radius) {
-	if (fabs([[view layer] cornerRadius] - radius) <= 0.5) return;
-	setContinuousCorners([view layer], radius);
-	[[view layer] setMasksToBounds:YES];
-	[view setNeedsLayout];
+	ccSetLockedRadius(view, radius);
+	BOOL changed = fabs([[view layer] cornerRadius] - radius) > 0.5;
+	if (changed) {
+		setContinuousCorners([view layer], radius);
+		[[view layer] setMasksToBounds:YES];
+		[view setNeedsLayout];
+	}
+	Class glassClass = objc_getClass("LGLiveBackdropView");
+	if (glassClass && [view isKindOfClass:glassClass]) ccGlassRefilter(view, changed);
+}
+
+// The module is small again: hand the radius back that the original had chosen before
+static void ccPillRelease(UIView *container) {
+	if (!objc_getAssociatedObject(container, KEY("lgfix_kContainerPillLockedKey"))) return;
+	objc_setAssociatedObject(container, KEY("lgfix_kContainerPillLockedKey"), nil, OBJC_ASSOCIATION_ASSIGN);
+	for (UIView *sub in [container subviews]) {
+		NSNumber *previous = objc_getAssociatedObject(sub, KEY("lgfix_kPillPreviousRadiusKey"));
+		if (!previous) continue;
+		objc_setAssociatedObject(sub, KEY("lgfix_kPillPreviousRadiusKey"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		if (sDesiredRadiusKey && objc_getAssociatedObject([sub layer], sDesiredRadiusKey))
+			objc_setAssociatedObject([sub layer], sDesiredRadiusKey, previous, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		[[sub layer] setCornerRadius:[previous doubleValue]];
+		[sub setNeedsLayout];
+	}
 }
 
 static void ccContainerPillUpdate(id object) {
 	UIView *container = object;
 	CGSize size = [container bounds].size;
-	if (size.height <= 220.0 || size.width <= 60.0) return;
+	if (size.height <= 220.0 || size.width <= 60.0) { ccPillRelease(container); return; }
 	UIView *slider = findSlider(container, 0);
-	if (!slider || [slider isHidden]) return;
+	if (!slider || [slider isHidden]) { ccPillRelease(container); return; }
 	CGSize s = [slider bounds].size;
-	if (fabs(s.width - size.width) >= 16.0 || fabs(s.height - size.height) >= 16.0) return;
+	if (fabs(s.width - size.width) >= 16.0 || fabs(s.height - size.height) >= 16.0) { ccPillRelease(container); return; }
 	CGFloat radius = MIN(size.width, size.height) * 0.5;
 	Class glassClass = objc_getClass("LGLiveBackdropView"), materialClass = objc_getClass("MTMaterialView");
 	int glasses = 0, materials = 0;
@@ -340,6 +430,7 @@ static void ccContainerPillUpdate(id object) {
 				if (glassClass && [inner isKindOfClass:glassClass]) { ccPillRound(inner, radius); glasses++; }
 		}
 	}
+	objc_setAssociatedObject(container, KEY("lgfix_kContainerPillLockedKey"), container, OBJC_ASSOCIATION_ASSIGN);
 	if (!objc_getAssociatedObject(container, KEY("lgfix_kContainerPillKey"))) {
 		objc_setAssociatedObject(container, KEY("lgfix_kContainerPillKey"), container, OBJC_ASSOCIATION_ASSIGN);
 		vlog("cc: whole-module slider %.0fx%.0f, pill radius %.0f on %d glass, %d material", size.width, size.height,
@@ -1158,6 +1249,42 @@ int lgfix_selftest(const char *path) {
 		} @catch (id e) { fprintf(f, "# blackKey threw\n"); }
 		fclose(f);
 		return 200 + sTestHits;
+	}
+}
+
+// For the private test host with the original loaded: the radius lock on a whole-module slider's material
+int lgfix_cctest(const char *path) {
+	@autoreleasepool {
+		FILE *f = fopen(path, "w");
+		if (!f) return -1;
+		Class containerClass = objc_getClass("CCUIContentModuleContentContainerView");
+		Class sliderClass = objc_getClass("CCUIContinuousSliderView"), materialClass = objc_getClass("MTMaterialView");
+		fprintf(f, "# classes %d %d %d original=%d\n", containerClass != nil, sliderClass != nil, materialClass != nil,
+		        dlsym(RTLD_DEFAULT, "LG_prefBool") != NULL); fflush(f);
+		if (!containerClass || !sliderClass || !materialClass) { fclose(f); return -2; }
+		UIView *container = [[containerClass alloc] initWithFrame:CGRectMake(0, 0, 150, 400)];
+		UIView *material = [[materialClass alloc] initWithFrame:CGRectMake(0, 0, 150, 400)];
+		UIView *slider = [[sliderClass alloc] initWithFrame:CGRectMake(0, 0, 100, 100)];
+		[container addSubview:material];
+		[container addSubview:slider];
+		fprintf(f, "# built\n"); fflush(f);
+		[slider layoutSubviews];
+		CGFloat a = [[material layer] cornerRadius];
+		[[material layer] setCornerRadius:10];
+		CGFloat b = [[material layer] cornerRadius];
+		fprintf(f, "# original rounded the material to %.1f, after setting 10: %.1f (locked when unchanged)\n", a, b); fflush(f);
+		[slider setFrame:CGRectMake(0, 0, 150, 400)];
+		ccContainerPillUpdate(container);
+		CGFloat c = [[material layer] cornerRadius];
+		[[material layer] setCornerRadius:20];
+		CGFloat d = [[material layer] cornerRadius];
+		fprintf(f, "# pill: %.1f, after setting 20: %.1f (want 75 75) key=%d\n", c, d, sDesiredRadiusKey != NULL); fflush(f);
+		[container setFrame:CGRectMake(0, 0, 70, 70)];
+		ccContainerPillUpdate(container);
+		CGFloat e = [[material layer] cornerRadius];
+		fprintf(f, "# small again: %.1f (want %.1f)\n", e, b);
+		fclose(f);
+		return (fabs(c - 75) < 0.5 && fabs(d - 75) < 0.5 && fabs(e - b) < 0.5) ? 1 : 0;
 	}
 }
 
