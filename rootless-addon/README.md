@@ -1,6 +1,6 @@
 # Liquid(Gl)ass-Reworked: rootless fixes
 
-Four libraries that are loaded next to the unchanged binaries of the original `dylv.liquidass 0.1.1-2b` (rootless). They ship inside the full rootless package (see [../rootless-full/](../rootless-full/)); up to release 1.0 they were a separate add-on package, `com.supremeinspirit.liquidassreworked`, which the full package replaces.
+Four libraries that are loaded next to the unchanged binaries of the original `dylv.liquidass 0.1.1-2b` (rootless). Releases ship them as the patch package `com.supremeinspirit.liquidassreworked` (these eight files, four libraries and their filter plists, plus `control`, packed with `dpkg-deb -Zgzip --root-owner-group -b`), installed on top of the original. [../rootless-full/](../rootless-full/) can alternatively build one package that also holds the original's binaries.
 
 - `lgfix.m` → `LiquidAssFix.dylib`, loaded into SpringBoard
 - `lgprefsfix.m` → `LiquidAssFixPrefs.dylib`, loaded into Settings (adds a "Dynamic Island" page to the Liquid (Gl)ass settings)

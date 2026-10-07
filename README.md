@@ -1,6 +1,6 @@
 # Liquid(Gl)ass-Reworked
 
-A reworked build of **Liquid (Gl)ass** with a rootful iOS 13 port and a full rootless package with fixes for iOS 17.
+A reworked build of **Liquid (Gl)ass** with a rootful iOS 13 port and a rootless patch package with fixes for iOS 15 to 17.
 
 ## Credits
 
@@ -18,7 +18,7 @@ The original tweak is licensed under [CC BY-NC 4.0](LICENSE) (https://creativeco
 | File | For | What it is |
 | --- | --- | --- |
 | `LiquidGlassReworked_<version>_rootful-ios13_iphoneos-arm.deb` | rootful jailbreaks, iOS 13 | the whole tweak (package `dylv.liquidass`), ported to iOS 13, arm64 |
-| `LiquidGlassReworked_<version>_rootless_iphoneos-arm64.deb` | rootless jailbreaks, iOS 15 and later | the whole tweak (package `dylv.liquidass`): the original 0.1.1-2b binaries plus the Reworked fixes in one package. Upgrades an installed original in place and replaces the former add-on package `com.supremeinspirit.liquidassreworked`. The fixes only load on arm64e devices (A12 and newer) |
+| `LiquidGlassReworked_<version>_rootless-patch_iphoneos-arm64.deb` | rootless jailbreaks, iOS 15 and later | the Reworked fixes as a patch package (`com.supremeinspirit.liquidassreworked`) that is installed on top of the original `dylv.liquidass` 0.1.1-2b by dylv: install the original first, then this file. It only adds its own libraries and changes none of the original's files. arm64e devices only (A12 and newer) |
 
 ## Tested on
 
@@ -47,7 +47,7 @@ Not available on iOS 13: App Library, iOS 14 widgets, widget background removal,
 
 ### Rootless package ([rootless-addon/](rootless-addon/), [rootless-full/](rootless-full/))
 
-The original tweak cannot be rebuilt for arm64e on the development phone, so the rootless package contains the unchanged binaries of the original 0.1.1-2b release plus four extra libraries with the fixes (sources in `rootless-addon/`); `rootless-full/build.sh` puts them together. For iOS 17:
+The original tweak cannot be rebuilt for arm64e on the development phone, so the fixes are four extra libraries that load next to the unchanged original 0.1.1-2b (sources in `rootless-addon/`). Releases ship them as a patch package to install on top of the original; `rootless-full/build.sh` can still put them into one package together with the original's binaries. On iOS 15 and 16 the Control Center fixes apply: an expanded module that is one big slider (WhitePointModule) is a pill as a whole instead of a pill slider on a squarer glass, no white fill on switched-on toggles, Now Playing glass. For iOS 17:
 
 - volume HUD glass (the original hooks a class that no longer exists on iOS 17)
 - Dynamic Island glass while the island is expanded, with its own settings page
