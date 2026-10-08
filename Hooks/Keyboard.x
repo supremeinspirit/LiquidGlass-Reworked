@@ -583,9 +583,14 @@ static void LGUpdateKeyboardVisualEffect(UIView *effectView) {
     if (changesRadius) {
         stockRadius = ((CGFloat (*)(id, SEL))objc_msgSend)(geometry,
                                                           radiusGetter);
-        CGFloat radius = fmin(23.0, fmax(0.0,
-            LG_prefFloat(@"Keyboard.KeyRadius",
-                         LGKeyboardDefaultKeyRadius)));
+        // The settings file first: a sandboxed app gets no values from the
+        // preferences system and would draw the default radius into the key
+        // image cache that all processes share.
+        id fileRadius = LGGlassPreferenceValue(@"Keyboard.KeyRadius");
+        CGFloat configuredRadius = [fileRadius isKindOfClass:[NSNumber class]]
+            ? (CGFloat)[fileRadius doubleValue]
+            : LG_prefFloat(@"Keyboard.KeyRadius", LGKeyboardDefaultKeyRadius);
+        CGFloat radius = fmin(23.0, fmax(0.0, configuredRadius));
         ((void (*)(id, SEL, CGFloat))objc_msgSend)(geometry, radiusSetter,
                                                    radius);
     }

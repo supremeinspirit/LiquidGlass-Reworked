@@ -1,0 +1,6 @@
+#!/bin/sh
+# The key images drawn so far can have mixed shapes (apps drew the default key radius into the cache all
+# processes share). The system draws them again when they are gone. The folder itself has to stay: iOS 13
+# does not make it again.
+rm -f /var/mobile/Library/Caches/com.apple.keyboards/images/* 2>/dev/null
+exit 0

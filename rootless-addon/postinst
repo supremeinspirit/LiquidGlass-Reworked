@@ -1,0 +1,5 @@
+#!/var/jb/bin/sh
+# The key images drawn so far have mixed shapes: LiquidAssFix empties the system key image cache at the next
+# SpringBoard start when its note of the keyboard settings is gone
+rm -f /var/mobile/Library/Accessibility/lgdiag/keyboard-cache-state
+exit 0

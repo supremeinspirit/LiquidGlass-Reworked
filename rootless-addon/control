@@ -1,8 +1,8 @@
 Package: com.supremeinspirit.liquidassreworked
-Name: Liquid (Gl)ass Reworked fixes (test11)
-Version: 4~test11
+Name: Liquid (Gl)ass Reworked fixes (test12)
+Version: 4~test12
 Architecture: iphoneos-arm64
-Description: The Reworked test11 fixes (test10 + Control Center slider module shape on iOS 15/16) as an add-on for the original Liquid (Gl)ass 0.1.1-2b by dylv (winaviation-tweaks). Install it on top of the original; arm64e only.
+Description: The Reworked test12 fixes (test11 + keyboard keys of one shape in every app) as an add-on for the original Liquid (Gl)ass 0.1.1-2b by dylv (winaviation-tweaks). Install it on top of the original; arm64e only.
 Maintainer: supremeinspirit
 Author: supremeinspirit (fixes), dylv (original Liquid (Gl)ass)
 Section: Tweaks
