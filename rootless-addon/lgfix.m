@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v81"
+#define BUILD_TAG "v85"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -40,6 +40,8 @@ typedef void (*LGFixHandler)(id object);
 #pragma mark - log
 
 static void flog(const char *fmt, ...) {
+	// the private self-test runs the same code: its lines must not look like something that happened on screen
+	if (getenv("LGFIX_SELFTEST")) return;
 	FILE *f = fopen(OUTDIR "/fix.log", "a");
 	if (!f) return;
 	va_list ap;
@@ -192,6 +194,7 @@ static void setContinuousCorners(CALayer *layer, CGFloat radius) {
 #pragma mark - volume HUD (SBElasticSliderView, iOS 17)
 
 static const char *cname(id obj);
+static NSArray *allWindows(void);
 static BOOL isNewestBuild(void);
 static void widgetFillUpdate(id object);
 static void widgetListUpdate(id object);
@@ -739,6 +742,40 @@ static void islandSetFillsHidden(UIView *window, BOOL hidden) {
 	if (gainClass) islandSetGainMapsHidden(window, gainClass, curtainClass, hidden, 0);
 }
 
+// The black pill over the camera cutout (_SBSystemApertureMagiciansCurtainView, one in each island window).
+// On the display the hardware sits there; in a screenshot it is a black bar in the middle of the glass
+// island. With DynamicIsland.ClearCutout on it is left out (empty mask) for as long as the island is glass.
+// Kill switch: CTLDIR/keep-cutout
+static NSHashTable *sIslandCurtains;
+static CFAbsoluteTime sIslandCurtainScan;
+
+static BOOL islandClearCutoutWanted(void) {
+	if (access(CTLDIR "/keep-cutout", F_OK) == 0) return NO;
+	BOOL (*prefBool)(id, BOOL) = dlsym(RTLD_DEFAULT, "LG_prefBool");
+	return prefBool ? prefBool(S("DynamicIsland.ClearCutout"), NO) : NO;
+}
+
+static void islandSetCutoutClear(BOOL clear) {
+	Class curtainClass = objc_getClass("_SBSystemApertureMagiciansCurtainView");
+	if (!curtainClass) return;
+	if (!sIslandCurtains) sIslandCurtains = [NSHashTable weakObjectsHashTable];
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (clear && [[sIslandCurtains allObjects] count] < 2 && now - sIslandCurtainScan > 1.0) {
+		sIslandCurtainScan = now;
+		for (UIWindow *window in allWindows()) {
+			if (strcmp(cname(window), "SBSystemApertureWindow")) continue;
+			UIView *curtain = findView(window, curtainClass, 6);
+			if (curtain && ![sIslandCurtains containsObject:curtain]) [sIslandCurtains addObject:curtain];
+		}
+	}
+	for (UIView *curtain in [sIslandCurtains allObjects]) {
+		BOOL was = objc_getAssociatedObject(curtain, KEY("lgfix_islandMask")) != nil;
+		islandSetFill(curtain, clear, NO);
+		BOOL is = objc_getAssociatedObject(curtain, KEY("lgfix_islandMask")) != nil;
+		if (was != is) flog("island: camera pill %s (%.0fx%.0f)", is ? "left out" : "back", [curtain bounds].size.width, [curtain bounds].size.height);
+	}
+}
+
 // Views of the container itself that draw black: the fill that enables the blob effect (shown during
 // transitions) and the container's gain map
 static void islandSetContainerFillsHidden(UIView *container, BOOL hidden) {
@@ -842,6 +879,76 @@ static void islandSetPortalKeyed(UIView *transformView, BOOL keyed) {
 
 static void islandSetFill(UIView *fill, BOOL hidden, BOOL requireBlack);
 
+// Now Playing: the audio wave (MRUWaveformView) comes in the variant made for the black island: an opaque black
+// view over the color layers with the bars punched out of it (destOut). On glass that is a black box behind the
+// wave. Drawn plain instead: no backing, the bars as they are (white), the color layers left out. Nothing here
+// blends with what lies behind the wave: a destIn on the bars view (the view's own clear variant) took the whole
+// island with it. Kill switch: CTLDIR/keep-waveform-black
+static void islandSetWaveformClear(UIView *wave, BOOL clear) {
+	UIView *bars = ivarObject(wave, "_barsView");
+	if (!bars) return;
+	CALayer *layer = [bars layer];
+	BOOL mine = objc_getAssociatedObject(wave, KEY("lgfix_islandWave")) != nil;
+	if (clear) {
+		// only the black variant, and only while it is exactly that
+		if (!mine && (!layerOpaqueBlack(layer) || [layer compositingFilter])) return;
+		if ([layer backgroundColor]) [bars setBackgroundColor:nil];
+		for (CALayer *bar in [layer sublayers])
+			if ([bar compositingFilter]) [bar setCompositingFilter:nil];
+		// the color layers under the bars view (a blurred color field and a gray multiply layer): left out with
+		// an empty mask, the view animates their opacity itself
+		int colors = 0;
+		for (CALayer *sibling in [[layer superlayer] sublayers]) {
+			if (sibling == layer) continue;
+			colors++;
+			if (objc_getAssociatedObject(sibling, KEY("lgfix_islandWaveMask")) || [sibling mask]) continue;
+			CALayer *empty = [CALayer layer];
+			[sibling setMask:empty];
+			objc_setAssociatedObject(sibling, KEY("lgfix_islandWaveMask"), empty, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+		if (!mine) {
+			objc_setAssociatedObject(wave, KEY("lgfix_islandWave"), wave, OBJC_ASSOCIATION_ASSIGN);
+			flog("island: audio wave drawn plain, without its black backing (%lu bars, %d color layers left out)",
+			     (unsigned long)[[layer sublayers] count], colors);
+		}
+	} else if (mine) {
+		for (CALayer *sibling in [[layer superlayer] sublayers]) {
+			CALayer *empty = objc_getAssociatedObject(sibling, KEY("lgfix_islandWaveMask"));
+			if (!empty) continue;
+			if ([sibling mask] == empty) [sibling setMask:nil];
+			objc_setAssociatedObject(sibling, KEY("lgfix_islandWaveMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+		[bars setBackgroundColor:[UIColor blackColor]];
+		for (CALayer *bar in [layer sublayers]) [bar setCompositingFilter:S("destOut")];
+		objc_setAssociatedObject(wave, KEY("lgfix_islandWave"), nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+}
+
+static void islandWaveformWalk(UIView *view, Class waveClass, BOOL clear, int depth) {
+	if (!view || depth > 12) return;
+	if ([view isKindOfClass:waveClass]) {
+		islandSetWaveformClear(view, clear);
+		return;
+	}
+	for (UIView *sub in [view subviews]) islandWaveformWalk(sub, waveClass, clear, depth + 1);
+}
+
+// The wave is not a subview of the element view (the island shows it through a portal), so the walk above does
+// not reach it: the wave views report themselves at their own layout and are kept here (weakly).
+static NSHashTable *sIslandWaves;
+
+static void islandWavesApply(BOOL clear) {
+	for (UIView *wave in [sIslandWaves allObjects]) islandSetWaveformClear(wave, clear);
+}
+
+static void islandWaveUpdate(id object) {
+	if (!sIslandWaves) sIslandWaves = [NSHashTable weakObjectsHashTable];
+	if (![sIslandWaves containsObject:object]) [sIslandWaves addObject:object];
+	UIView *container = sIslandContainer;
+	UIView *glass = container ? objc_getAssociatedObject(container, KEY("lgfix_kIslandGlassKey")) : nil;
+	islandSetWaveformClear(object, glass && ![glass isHidden] && access(CTLDIR "/keep-waveform-black", F_OK) != 0);
+}
+
 // Content of the element shown in the island: its indicator views and the snapshot the system cross-fades
 // from during a size transition (it is taken of the black island)
 static void islandSetElementAdapted(UIView *container, BOOL adapted) {
@@ -852,6 +959,10 @@ static void islandSetElementAdapted(UIView *container, BOOL adapted) {
 	islandSetPortalKeyed(ivarObject(elementView, "_leadingTransformView"), keyOut);
 	islandSetPortalKeyed(ivarObject(elementView, "_trailingTransformView"), keyOut);
 	islandSetPortalKeyed(ivarObject(elementView, "_minimalTransformView"), keyOut);
+	Class waveClass = objc_getClass("MRUWaveformView");
+	if (waveClass && [elementView isKindOfClass:[UIView class]])
+		islandWaveformWalk(elementView, waveClass, adapted && access(CTLDIR "/keep-waveform-black", F_OK) != 0, 0);
+	islandWavesApply(adapted && access(CTLDIR "/keep-waveform-black", F_OK) != 0);
 	if (access(CTLDIR "/keep-snapshot", F_OK) != 0) {
 		islandSetFill(ivarObject(controller, "_snapshotView"), adapted, NO);
 		// Image view next to the element view, centered on the island and clipped to its shape: alpha 1 at the
@@ -947,6 +1058,7 @@ static void islandUpdate(id object) {
 			islandSetFillsHidden(window, NO);
 			islandSetContainerFillsHidden(container, NO);
 			islandSetElementAdapted(container, NO);
+			islandSetCutoutClear(NO);
 		}
 		return;
 	}
@@ -1017,6 +1129,7 @@ static void islandUpdate(id object) {
 	islandSetFillsHidden(window, YES);
 	islandSetContainerFillsHidden(container, YES);
 	islandSetElementAdapted(container, YES);
+	islandSetCutoutClear(islandClearCutoutWanted());
 	// The element's views are filled in after this layout without another one: look again a few times
 	if (!objc_getAssociatedObject(container, KEY("lgfix_islandRecheck"))) {
 		objc_setAssociatedObject(container, KEY("lgfix_islandRecheck"), container, OBJC_ASSOCIATION_ASSIGN);
@@ -1247,6 +1360,31 @@ int lgfix_selftest(const char *path) {
 			fprintf(f, "# blackKey filter=%s type=%s m11=%.2f m42=%.4f (want 1.00 1.0000)\n", cname(filter),
 			        back ? [back objCType] : "-", m[0], m[16]);
 		} @catch (id e) { fprintf(f, "# blackKey threw\n"); }
+		// island audio wave: the real view in its island variant, switched to the clear variant and back
+		@try {
+			dlopen("/System/Library/PrivateFrameworks/MediaControls.framework/MediaControls", RTLD_NOW);
+			Class waveClass = objc_getClass("MRUWaveformView");
+			SEL initSel = sel_registerName("initWithFrame:context:");
+			UIView *wave = waveClass && [waveClass instancesRespondToSelector:initSel]
+				? ((id (*)(id, SEL, CGRect, unsigned long long))objc_msgSend)([waveClass alloc], initSel, CGRectMake(0, 0, 40, 24), 0ULL) : nil;
+			UIView *holder = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 60, 30)];
+			if (wave) [holder addSubview:wave];
+			[wave layoutIfNeeded];
+			CALayer *bars = [(UIView *)ivarObject(wave, "_barsView") layer];
+			CALayer *bar = [[bars sublayers] firstObject];
+			if (wave) islandWaveUpdate(wave);
+			int before = layerOpaqueBlack(bars) && ![bars compositingFilter] && [bar compositingFilter] && [sIslandWaves containsObject:wave];
+			if (waveClass) islandWaveformWalk(holder, waveClass, YES, 0);
+			[wave setNeedsLayout];
+			[wave layoutIfNeeded];
+			if (waveClass) islandWaveformWalk(holder, waveClass, YES, 0);
+			CALayer *color = [[[bars superlayer] sublayers] firstObject];
+			int cleared = ![bars backgroundColor] && ![bars compositingFilter] && ![bar compositingFilter] && color != bars && [color mask];
+			if (waveClass) islandWaveformWalk(holder, waveClass, NO, 0);
+			int restored = layerOpaqueBlack(bars) && ![bars compositingFilter] && [[bar compositingFilter] isEqual:S("destOut")] && ![color mask];
+			fprintf(f, "# wave view=%d bars=%lu black variant=%d cleared=%d restored=%d (want 1 6 1 1 1)\n", wave != nil,
+			        (unsigned long)[[bars sublayers] count], before, cleared, restored);
+		} @catch (id e) { fprintf(f, "# wave threw\n"); }
 		fclose(f);
 		return 200 + sTestHits;
 	}
@@ -1317,12 +1455,14 @@ static void registerHandlers(void (*reg)(const char *, LGFixHandler)) {
 	reg("cc.mediastyle", ccMediaStyleUpdate);
 	reg("island", islandUpdate);
 	reg("island.element", islandElementUpdate);
+	reg("island.wave", islandWaveUpdate);
 	reg("widget.fill", widgetFillUpdate);
 	reg("widget.list", widgetListUpdate);
 }
 
 static void installHooks(int (*hook)(const char *, const char *), const char *why) {
-	flog("%s: island=%d element=%d", why, hook("SBSystemApertureContainerView", "island"), hook("SAUIElementView", "island.element"));
+	flog("%s: island=%d element=%d wave=%d", why, hook("SBSystemApertureContainerView", "island"),
+	     hook("SAUIElementView", "island.element"), hook("MRUWaveformView", "island.wave"));
 	flog("%s: widgetFill=%d list=%d", why, hook("CHUISWidgetHostViewControllerView", "widget.fill"),
 	     hook("SBIconListView", "widget.list"));
 	@try {

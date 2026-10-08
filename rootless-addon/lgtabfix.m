@@ -34,6 +34,16 @@
 // on; a setting that is not in the file leaves the original's value alone.
 //
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-key-radius-fix
+//
+// Dynamic Island audio wave: what the island shows while music plays is not drawn by SpringBoard. It is a
+// scene of the MediaRemoteUI app, and the island only hosts its layers. The wave in it (MRUWaveformView,
+// MediaControls) comes in the variant made for the black island: an opaque black view over the color layers
+// with the bars punched out of it (destOut). On the add-on's island glass that is a black box behind the
+// wave. In MediaRemoteUI only, and only while the island glass is switched on, the wave is drawn plain:
+// no backing, the bars as they are (white), the color layers left out. Nothing here blends with what lies
+// behind the wave.
+//
+// Kill switch: create /var/jb/usr/lib/LiquidAssFix/keep-waveform-black
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -49,7 +59,7 @@
 #include <ptrauth.h>
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
-#define BUILD_TAG "t2"
+#define BUILD_TAG "t3"
 #define MAX_BUTTONS 16
 #define MAX_TRIES 3
 
@@ -259,10 +269,177 @@ static void installKeyRadius(void) {
 	keyHookInstalled = YES;
 }
 
+#pragma mark - Dynamic Island audio wave (MediaRemoteUI)
+
+#define WAVE_PROCESS "MediaRemoteUI"
+#define PREFS_FILE "/var/jb/var/mobile/Library/Preferences/dylv.liquidassprefs.plist"
+
+static IMP origWaveLayout;
+static BOOL waveHookInstalled, waveLogged;
+static int waveForce;               // self-test: 1 = glass on, -1 = glass off
+static int waveGlass = -1;          // last answer, -1 = not asked yet
+static CFAbsoluteTime waveAskedAt;
+static int waveInstallTries;
+
+static id ivarObject(id object, const char *name) {
+	if (!object) return nil;
+	Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+	if (!ivar) return nil;
+	const char *type = ivar_getTypeEncoding(ivar);
+	if (!type || type[0] != '@') return nil;
+	return object_getIvar(object, ivar);
+}
+
+static BOOL layerOpaqueBlack(CALayer *layer) {
+	CGColorRef bg = [layer backgroundColor];
+	if (!bg || CGColorGetAlpha(bg) < 0.9) return NO;
+	const CGFloat *c = CGColorGetComponents(bg);
+	size_t n = CGColorGetNumberOfComponents(bg);
+	for (size_t i = 0; i + 1 < n; i++)
+		if (c[i] > 0.05) return NO;
+	return YES;
+}
+
+// A switch from the settings file; missing = fallback
+static BOOL fileSwitch(NSDictionary *prefs, const char *name, BOOL fallback) {
+	id value = [prefs objectForKey:[NSString stringWithUTF8String:name]];
+	return [value isKindOfClass:[NSNumber class]] ? [value boolValue] : fallback;
+}
+
+// Is the island drawn as glass? SpringBoard decides that; here only the same switches can be read (the
+// tweak, the Pill HUD surface the island glass belongs to, the add-on's Dynamic Island switch). Asked again
+// at most every two seconds. A settings file that cannot be read leaves the wave as it is.
+static BOOL islandGlassOn(void) {
+	if (waveForce) return waveForce > 0;
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (waveGlass >= 0 && now - waveAskedAt < 2.0) return waveGlass;
+	waveAskedAt = now;
+	int answer = 0;
+	const char *why = "settings file not readable";
+	if (access(CTLDIR "/keep-waveform-black", F_OK) == 0 || access(CTLDIR "/disabled", F_OK) == 0) {
+		why = "switched off by file";
+	} else {
+		NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:[NSString stringWithUTF8String:PREFS_FILE]];
+		if (prefs) {
+			answer = fileSwitch(prefs, "Global.Enabled", YES) && fileSwitch(prefs, "PillHUD.Enabled", NO)
+			      && fileSwitch(prefs, "DynamicIsland.Enabled", YES);
+			why = answer ? "island glass on" : "island glass off in the settings";
+		}
+	}
+	if (answer != waveGlass) tlog("audio wave: %s", why);
+	waveGlass = answer;
+	return answer;
+}
+
+static void waveSetClear(UIView *wave, BOOL clear) {
+	UIView *bars = ivarObject(wave, "_barsView");
+	if (!bars) return;
+	CALayer *layer = [bars layer];
+	BOOL mine = objc_getAssociatedObject(wave, KEY("lgfix_islandWave")) != nil;
+	if (clear) {
+		// only the black variant, and only while it is exactly that
+		if (!mine && (!layerOpaqueBlack(layer) || [layer compositingFilter])) return;
+		if ([layer backgroundColor]) [bars setBackgroundColor:nil];
+		for (CALayer *bar in [layer sublayers])
+			if ([bar compositingFilter]) [bar setCompositingFilter:nil];
+		// the color layers under the bars view (a blurred color field and a gray multiply layer): left out
+		// with an empty mask, the view animates their opacity itself
+		for (CALayer *sibling in [[layer superlayer] sublayers]) {
+			if (sibling == layer) continue;
+			if (objc_getAssociatedObject(sibling, KEY("lgfix_islandWaveMask")) || [sibling mask]) continue;
+			CALayer *empty = [CALayer layer];
+			[sibling setMask:empty];
+			objc_setAssociatedObject(sibling, KEY("lgfix_islandWaveMask"), empty, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+		if (!mine) {
+			objc_setAssociatedObject(wave, KEY("lgfix_islandWave"), wave, OBJC_ASSOCIATION_ASSIGN);
+			if (!waveLogged) {
+				waveLogged = YES;
+				tlog("audio wave: drawn plain, without its black backing (%lu bars, logged once)",
+				     (unsigned long)[[layer sublayers] count]);
+			}
+		}
+	} else if (mine) {
+		for (CALayer *sibling in [[layer superlayer] sublayers]) {
+			CALayer *empty = objc_getAssociatedObject(sibling, KEY("lgfix_islandWaveMask"));
+			if (!empty) continue;
+			if ([sibling mask] == empty) [sibling setMask:nil];
+			objc_setAssociatedObject(sibling, KEY("lgfix_islandWaveMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+		[bars setBackgroundColor:[UIColor blackColor]];
+		for (CALayer *bar in [layer sublayers]) [bar setCompositingFilter:[NSString stringWithUTF8String:"destOut"]];
+		objc_setAssociatedObject(wave, KEY("lgfix_islandWave"), nil, OBJC_ASSOCIATION_ASSIGN);
+	}
+}
+
+static void waveLayout(UIView *self, SEL _cmd) {
+	((void (*)(id, SEL))origWaveLayout)(self, _cmd);
+	@try { waveSetClear(self, islandGlassOn()); } @catch (id e) {}
+}
+
+// MediaControls may not be loaded yet when this library is: tried again for a while
+static void installWave(void *force) {
+	if (waveHookInstalled) return;
+	if (!force && strcmp(getprogname(), WAVE_PROCESS) != 0) return;
+	Class cls = objc_getClass("MRUWaveformView");
+	SEL sel = sel_registerName("layoutSubviews");
+	Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
+	if (!method) {
+		if (++waveInstallTries <= 20)
+			dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_main_queue(), force, installWave);
+		return;
+	}
+	// the class's own method is replaced; one it only inherits gets an own method that calls the inherited one
+	origWaveLayout = method_getImplementation(method);
+	if (!class_addMethod(cls, sel, (IMP)waveLayout, method_getTypeEncoding(method)))
+		origWaveLayout = method_setImplementation(method, (IMP)waveLayout);
+	waveHookInstalled = YES;
+	tlog("audio wave: watching the wave view");
+}
+
 __attribute__((constructor)) static void lgtabfix_init(void) {
 	if (access(CTLDIR "/disabled", F_OK) == 0) return;
 	install();
 	installKeyRadius();
+	installWave(NULL);
+}
+
+// Private self-test (host) with the real wave view in its island variant: 1 hook in, 10 black variant as
+// expected, 100 cleared by its own layout, 1000 stays cleared over a second layout, 10000 put back
+int lgtabfix_wavetest(const char *arg) {
+	(void)arg;
+	@autoreleasepool {
+		int result = 0;
+		dlopen("/System/Library/PrivateFrameworks/MediaControls.framework/MediaControls", RTLD_NOW);
+		waveForce = -1;
+		installWave((void *)1);
+		if (waveHookInstalled) result += 1;
+		Class cls = objc_getClass("MRUWaveformView");
+		SEL initSel = sel_registerName("initWithFrame:context:");
+		if (!cls || ![cls instancesRespondToSelector:initSel]) return result;
+		UIView *wave = ((id (*)(id, SEL, CGRect, unsigned long long))objc_msgSend)([cls alloc], initSel, CGRectMake(0, 0, 40, 24), 0ULL);
+		UIView *holder = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 60, 30)];
+		[holder addSubview:wave];
+		[wave layoutIfNeeded];
+		CALayer *bars = [(UIView *)ivarObject(wave, "_barsView") layer];
+		CALayer *bar = [[bars sublayers] firstObject];
+		NSUInteger siblings = [[[bars superlayer] sublayers] count];
+		if (layerOpaqueBlack(bars) && [bar compositingFilter] && [[bars sublayers] count] == 6 && siblings == 2) result += 10;
+		waveForce = 1;
+		[wave setNeedsLayout];
+		[wave layoutIfNeeded];
+		CALayer *colors = nil;
+		for (CALayer *sibling in [[bars superlayer] sublayers]) if (sibling != bars) colors = sibling;
+		if (![bars backgroundColor] && ![bar compositingFilter] && [colors mask]) result += 100;
+		[wave setNeedsLayout];
+		[wave layoutIfNeeded];
+		if (![bars backgroundColor] && ![bar compositingFilter] && [colors mask]) result += 1000;
+		waveForce = -1;
+		[wave setNeedsLayout];
+		[wave layoutIfNeeded];
+		if (layerOpaqueBlack(bars) && [bar compositingFilter] && ![colors mask]) result += 10000;
+		return result;
+	}
 }
 
 static CGFloat testRadius = 4.5, testSeen;

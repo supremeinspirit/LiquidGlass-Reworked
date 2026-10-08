@@ -5,7 +5,7 @@
 // list and a method the item calls, which pushes another LGPSurfaceController with the island's items.
 // Keys written (domain dylv.liquidassprefs, read by lgfix in SpringBoard):
 //   DynamicIsland.Enabled (bool, default on), DynamicIsland.TintColor ("#RRGGBBAA", default transparent),
-//   DynamicIsland.SpecularEnabled (bool, default off)
+//   DynamicIsland.SpecularEnabled (bool, default off), DynamicIsland.ClearCutout (bool, default off)
 //
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-prefs-page
 
@@ -59,12 +59,19 @@ static NSArray *dynamicIslandItems(void) {
 	[specular setObject:S("DynamicIsland.Enabled") forKey:S("enabled_key")];
 	[specular setObject:[NSNumber numberWithBool:YES] forKey:S("enabled_default")];
 
+	NSMutableDictionary *cutout = [item("switch", "Clear Camera Pill",
+	                                    "Leaves out the black pill over the camera while the island is glass. It only shows in screenshots and recordings. Off keeps the standard black pill.") mutableCopy];
+	[cutout setObject:S("DynamicIsland.ClearCutout") forKey:S("key")];
+	[cutout setObject:[NSNumber numberWithBool:NO] forKey:S("default")];
+	[cutout setObject:S("DynamicIsland.Enabled") forKey:S("enabled_key")];
+	[cutout setObject:[NSNumber numberWithBool:YES] forKey:S("enabled_default")];
+
 	NSDictionary *section = item("section", "Glass",
 	                             "The island uses the Pill HUD glass. Pill HUD has to stay enabled, and its parameters apply to the island.");
 	NSMutableDictionary *pill = [item("nav", "Pill HUD", "") mutableCopy];
 	[pill setObject:S("PillHUD") forKey:S("surface_identifier")];
 
-	return [NSArray arrayWithObjects:enabled, tint, specular, section, pill, nil];
+	return [NSArray arrayWithObjects:enabled, tint, specular, cutout, section, pill, nil];
 }
 
 // Adds the nav item to the "Surfaces" list, after Pill HUD. Returns 1 when added.
