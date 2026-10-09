@@ -24,7 +24,7 @@ The original tweak is licensed under [CC BY-NC 4.0](LICENSE) (https://creativeco
 | File | For | What it is |
 | --- | --- | --- |
 | `LiquidGlassReworked_<version>_rootful-ios13_iphoneos-arm.deb` | rootful jailbreaks, iOS 13 | the whole tweak (package `dylv.liquidass`), ported to iOS 13, arm64 |
-| `LiquidGlassReworked_<version>_rootless-patch_iphoneos-arm64.deb` | rootless jailbreaks, iOS 15 and later | the Reworked fixes as a patch package (`com.supremeinspirit.liquidassreworked`) that is installed on top of the original `dylv.liquidass` 0.1.1-2b by dylv: install the original first, then this file. It only adds its own libraries and changes none of the original's files. arm64e devices only (A12 and newer) |
+| `LiquidGlassReworked_<version>_rootless-patch_iphoneos-arm64.deb` | rootless jailbreaks, iOS 15 and later | the Reworked fixes as a patch package (`com.supremeinspirit.liquidassreworked`) that is installed on top of the original `dylv.liquidass` 0.1.1-2b by dylv: install the original first, then this file. It only adds its own libraries and changes none of the original's files. arm64 |
 
 ## Tested on
 
@@ -63,6 +63,8 @@ The original tweak cannot be rebuilt for arm64e on the development phone, so the
 - widget backgrounds are removed reliably (the original's removal often did not start in the iOS 17 widget renderer)
 
 On every iOS version: keyboard keys take the tweak's key radius and font reliably (the system's cache of drawn keys is emptied when those settings change; the original never empties it, so old and new key shapes got mixed). And in apps the floating tab bar no longer puts all titles on top of each other at its right end when the bar is laid out only once (App Store); the rootful port has the same fix in `Hooks/TabBar.x`.
+
+New in test17 (rootless): liquid glass on the **text loupe** (the lens shown while the insertion point is dragged through text; a frosted pane that holds only the text being edited) and on **text bars** (the system's search fields and Safari's address bar), each with its own page in the settings (Surfaces → Text Loupe / Text Bars). Tested on iOS 17.3 only.
 
 ---
 

@@ -1,4 +1,5 @@
-// LiquidAssFixPrefs: adds a "Dynamic Island" page to the stock LiquidAss settings (loaded into Preferences).
+// LiquidAssFixPrefs: adds a "Dynamic Island" and a "Text Loupe" page to the stock LiquidAss settings (loaded
+// into Preferences).
 // Runtime style on purpose: no @"" literals and no @implementation (see lgfix.m).
 //
 // The stock UI is LGPSurfaceController fed with item dictionaries. This adds one nav item to the "Surfaces"
@@ -6,6 +7,10 @@
 // Keys written (domain dylv.liquidassprefs, read by lgfix in SpringBoard):
 //   DynamicIsland.Enabled (bool, default on), DynamicIsland.TintColor ("#RRGGBBAA", default transparent),
 //   DynamicIsland.SpecularEnabled (bool, default off), DynamicIsland.ClearCutout (bool, default off)
+// Text Loupe: TextLoupe.Enabled (bool, default on; read by LiquidAssFixApps in every app). The lens is drawn with
+// the renderer's "PrefsSlider" glass, so the page shows that host's stock parameter items (PrefsSlider.*).
+// Search Fields: SearchField.Enabled (bool, default on; read by LiquidAssFixApps in every app). Drawn with the
+// "SearchPill" glass, the page links to that surface.
 //
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-prefs-page
 
@@ -20,6 +25,9 @@
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define S(cstr) [NSString stringWithUTF8String:(cstr)]
 #define ACTION "lgfixOpenDynamicIsland:"
+#define LOUPE_ACTION "lgfixOpenTextLoupe:"
+#define LOUPE_HOST "PrefsSlider"
+#define FIELD_ACTION "lgfixOpenSearchFields:"
 
 // Declaration only (no class is emitted): gives the compiler the designated initializer's types
 @interface LGFixSurfaceControllerShape : UIViewController
@@ -74,7 +82,56 @@ static NSArray *dynamicIslandItems(void) {
 	return [NSArray arrayWithObjects:enabled, tint, specular, cutout, section, pill, nil];
 }
 
-// Adds the nav item to the "Surfaces" list, after Pill HUD. Returns 1 when added.
+// The switch, then the stock parameter items of the glass the lens is drawn with (without that host's own switch)
+static NSArray *textLoupeItems(void) {
+	NSMutableDictionary *enabled = [item("switch", "Enabled",
+	                                     "Liquid glass on the lens that appears while the insertion point is dragged through text. A lens hanging over a screen edge stays without glass.") mutableCopy];
+	[enabled setObject:S("TextLoupe.Enabled") forKey:S("key")];
+	[enabled setObject:[NSNumber numberWithBool:YES] forKey:S("default")];
+	[enabled setObject:[NSNumber numberWithBool:YES] forKey:S("controls_following_panel")];
+	NSMutableArray *items = [NSMutableArray arrayWithObjects:enabled, nil];
+	[items addObject:item("section", "Glass",
+	                      "The lens shares its glass with the slider knobs of these settings: the values below apply to both. Apps pick up a changed blur or highlight when they are opened again.")];
+	NSArray *(*rendererItems)(NSString *) = dlsym(RTLD_DEFAULT, "LGRendererItemsForHostPrefix");
+	NSArray *stock = rendererItems ? rendererItems(S(LOUPE_HOST)) : nil;
+	if (![stock isKindOfClass:[NSArray class]]) return items;
+	for (id entry in stock) {
+		if (![entry isKindOfClass:[NSDictionary class]]) continue;
+		id key = [entry objectForKey:S("key")];
+		if ([key isKindOfClass:[NSString class]] && [key isEqualToString:S(LOUPE_HOST ".Enabled")]) continue;
+		NSMutableDictionary *copy = [entry mutableCopy];
+		[copy setObject:S("TextLoupe.Enabled") forKey:S("enabled_key")];
+		[copy setObject:[NSNumber numberWithBool:YES] forKey:S("enabled_default")];
+		[items addObject:copy];
+	}
+	return items;
+}
+
+static NSArray *searchFieldItems(void) {
+	NSMutableDictionary *enabled = [item("switch", "Enabled",
+	                                     "Liquid glass in place of the grey backing of text bars: search fields in all apps and Safari's address bar. Blur and tint apply within a few seconds, switching on or off when the app is opened again.") mutableCopy];
+	[enabled setObject:S("SearchField.Enabled") forKey:S("key")];
+	[enabled setObject:[NSNumber numberWithBool:YES] forKey:S("default")];
+	NSMutableDictionary *blur = [item("slider", "Blur", "Softness of what shows through the bar. 0 is clear glass.") mutableCopy];
+	[blur setObject:S("SearchField.Blur") forKey:S("key")];
+	[blur setObject:[NSNumber numberWithDouble:5.0] forKey:S("default")];
+	[blur setObject:[NSNumber numberWithDouble:0.0] forKey:S("min")];
+	[blur setObject:[NSNumber numberWithDouble:30.0] forKey:S("max")];
+	[blur setObject:[NSNumber numberWithInteger:1] forKey:S("decimals")];
+	[blur setObject:S("SearchField.Enabled") forKey:S("enabled_key")];
+	[blur setObject:[NSNumber numberWithBool:YES] forKey:S("enabled_default")];
+	NSMutableDictionary *tint = [item("color", "Tint Color", "Color laid over the bar's glass, also used for the bar inside the text lens. Raise its alpha for better legibility.") mutableCopy];
+	[tint setObject:S("SearchField.TintColor") forKey:S("key")];
+	[tint setObject:S("#00000000") forKey:S("default")];
+	[tint setObject:S("SearchField.Enabled") forKey:S("enabled_key")];
+	[tint setObject:[NSNumber numberWithBool:YES] forKey:S("enabled_default")];
+	NSDictionary *section = item("section", "Rim", "Rim width and refraction are those of the Search Pill glass.");
+	NSMutableDictionary *pill = [item("nav", "Search Pill", "") mutableCopy];
+	[pill setObject:S("SearchPill") forKey:S("surface_identifier")];
+	return [NSArray arrayWithObjects:enabled, blur, tint, section, pill, nil];
+}
+
+// Adds the nav items to the "Surfaces" list, after Pill HUD. Returns 1 when added.
 static int patchSurfaceItems(id controller) {
 	Class cls = object_getClass(controller);
 	Ivar identifierIvar = class_getInstanceVariable(cls, "_screenIdentifier");
@@ -96,8 +153,14 @@ static int patchSurfaceItems(id controller) {
 	}
 	NSMutableDictionary *nav = [item("nav", "Dynamic Island", "") mutableCopy];
 	[nav setObject:S(ACTION) forKey:S("action")];
+	NSMutableDictionary *loupe = [item("nav", "Text Loupe", "") mutableCopy];
+	[loupe setObject:S(LOUPE_ACTION) forKey:S("action")];
 	NSMutableArray *patched = [items mutableCopy];
 	[patched insertObject:nav atIndex:insertAt];
+	[patched insertObject:loupe atIndex:insertAt + 1];
+	NSMutableDictionary *fields = [item("nav", "Text Bars", "") mutableCopy];
+	[fields setObject:S(FIELD_ACTION) forKey:S("action")];
+	[patched insertObject:fields atIndex:insertAt + 2];
 	object_setIvarWithStrongDefault(controller, itemsIvar, [patched copy]);
 	return 1;
 }
@@ -125,6 +188,34 @@ static void openDynamicIsland(id self, SEL _cmd, id sender) {
 	} @catch (id e) {}
 }
 
+static void openTextLoupe(id self, SEL _cmd, id sender) {
+	@try {
+		Class cls = objc_getClass("LGPSurfaceController");
+		if (!cls) return;
+		UIViewController *page = [(LGFixSurfaceControllerShape *)[cls alloc]
+		    initWithTitle:S("Text Loupe")
+		         subtitle:S("Liquid glass for the text cursor lens")
+		        tintColor:[UIColor systemBlueColor]
+		       identifier:S("TextLoupe")
+		            items:textLoupeItems()];
+		[[(UIViewController *)self navigationController] pushViewController:page animated:YES];
+	} @catch (id e) {}
+}
+
+static void openSearchFields(id self, SEL _cmd, id sender) {
+	@try {
+		Class cls = objc_getClass("LGPSurfaceController");
+		if (!cls) return;
+		UIViewController *page = [(LGFixSurfaceControllerShape *)[cls alloc]
+		    initWithTitle:S("Text Bars")
+		         subtitle:S("Liquid glass for search fields and Safari's address bar")
+		        tintColor:[UIColor systemTealColor]
+		       identifier:S("SearchField")
+		            items:searchFieldItems()];
+		[[(UIViewController *)self navigationController] pushViewController:page animated:YES];
+	} @catch (id e) {}
+}
+
 static BOOL sInstalled;
 
 // The settings bundle is loaded when its pane is first opened; returns 1 once the class is there and hooked
@@ -143,6 +234,8 @@ static int install(void) {
 	if (![cls instancesRespondToSelector:sel_registerName("initWithTitle:subtitle:tintColor:identifier:items:")]) return 0;
 	sInstalled = YES;
 	class_addMethod(cls, sel_registerName(ACTION), (IMP)openDynamicIsland, "v@:@");
+	class_addMethod(cls, sel_registerName(LOUPE_ACTION), (IMP)openTextLoupe, "v@:@");
+	class_addMethod(cls, sel_registerName(FIELD_ACTION), (IMP)openSearchFields, "v@:@");
 	sOrigViewDidLoad = method_setImplementation(own, (IMP)surfaceViewDidLoad);
 	return 1;
 }
@@ -165,13 +258,17 @@ int lgprefsfix_selftest(const char *outPath) {
 		                                                           identifier:S("Surfaces") items:base];
 		int first = patchSurfaceItems(surfaces), second = patchSurfaceItems(surfaces);
 		NSArray *items = object_getIvar(surfaces, class_getInstanceVariable(cls, "_items"));
-		fprintf(f, "# patch first=%d second=%d count=%d (want 1 0 4)\n", first, second, (int)[items count]);
+		fprintf(f, "# patch first=%d second=%d count=%d (want 1 0 6)\n", first, second, (int)[items count]);
 		fprintf(f, "# items=%s\n", [[items description] UTF8String]);
 		id other = [(LGFixSurfaceControllerShape *)[cls alloc] initWithTitle:S("t") subtitle:S("s") tintColor:nil
 		                                                        identifier:S("Dock") items:base];
 		fprintf(f, "# other=%d (want 0) responds=%d\n", patchSurfaceItems(other),
 		        [surfaces respondsToSelector:sel_registerName(ACTION)]);
 		fprintf(f, "# island items=%s\n", [[dynamicIslandItems() description] UTF8String]);
+		NSArray *loupeItems = textLoupeItems();
+		fprintf(f, "# search field items=%s\n", [[searchFieldItems() description] UTF8String]);
+		fprintf(f, "# loupe responds=%d items=%d %s\n", [surfaces respondsToSelector:sel_registerName(LOUPE_ACTION)],
+		        (int)[loupeItems count], [[loupeItems description] UTF8String]);
 		fclose(f);
 		return first * 100 + second * 10 + (int)[items count];
 	}
