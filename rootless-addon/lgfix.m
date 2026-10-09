@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v86"
+#define BUILD_TAG "v91"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -742,9 +742,82 @@ static void islandSetFillsHidden(UIView *window, BOOL hidden) {
 	if (gainClass) islandSetGainMapsHidden(window, gainClass, curtainClass, hidden, 0);
 }
 
+// How the display treats the island (iOS 17): without anything else it keeps the area between the two camera
+// cutouts black by itself. The CAGainMapLayers of the curtains and of the body control that. Their mode
+// follows the holder's rendering configuration: at rest {style 1, cloning 0} = "gainFill", the display fills
+// the pill black (only on the real screen, no mask or alpha reaches it); while the island is expanded
+// {0, 2} = "gainBorderRenderFill", the fill is ordinary content (which a mask on the holder removes) and the
+// display only draws the edge of the layer as a thin ring. For the clear camera pill the resting island
+// therefore keeps the expanded configuration, and the curtains' gain layers are enlarged until their edge
+// lies outside the screen (the ring follows the layer, the opened area stays open).
+typedef struct { long long style; long long cloning; } LGIslandRenderingConfiguration;
+static BOOL sIslandRendered;
+static IMP sIslandSetConfigOrig;
+
+static void islandGainSetConfig(id self, SEL _cmd, LGIslandRenderingConfiguration config) {
+	objc_setAssociatedObject(self, KEY("lgfix_islandConfigStyle"), [NSNumber numberWithLongLong:config.style], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(self, KEY("lgfix_islandConfigCloning"), [NSNumber numberWithLongLong:config.cloning], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	if (sIslandRendered) {
+		config.style = 0;
+		config.cloning = 2;
+	}
+	if (sIslandSetConfigOrig) ((void (*)(id, SEL, LGIslandRenderingConfiguration))sIslandSetConfigOrig)(self, _cmd, config);
+}
+
+static void islandConfigInstall(void) {
+	if (getenv("LGFIX_ISLANDCONFIGHOOK")) return;   // an earlier build owns the hook
+	Class cls = objc_getClass("_SBSystemApertureGainMapView");
+	SEL sel = sel_registerName("setRenderingConfiguration:");
+	unsigned int count = 0;
+	Method *methods = cls ? class_copyMethodList(cls, &count) : NULL;
+	for (unsigned int m = 0; m < count; m++)
+		if (method_getName(methods[m]) == sel)
+			sIslandSetConfigOrig = method_setImplementation(methods[m], (IMP)islandGainSetConfig);
+	free(methods);
+	if (sIslandSetConfigOrig) setenv("LGFIX_ISLANDCONFIGHOOK", BUILD_TAG, 1);
+	flog("island: rendering configuration hook installed=%d", sIslandSetConfigOrig != NULL);
+}
+
+// Hands the holder its configuration again (the one the system last asked for), so that the hook above
+// replaces it or lets it through, whichever applies now
+static void islandSyncConfig(UIView *holder) {
+	if (!holder || !sIslandSetConfigOrig) return;
+	BOOL forced = objc_getAssociatedObject(holder, KEY("lgfix_islandConfigForced")) != nil;
+	if (forced == sIslandRendered) return;
+	NSNumber *style = objc_getAssociatedObject(holder, KEY("lgfix_islandConfigStyle"));
+	NSNumber *cloning = objc_getAssociatedObject(holder, KEY("lgfix_islandConfigCloning"));
+	LGIslandRenderingConfiguration config;
+	config.style = style ? [style longLongValue] : 1;
+	config.cloning = cloning ? [cloning longLongValue] : 0;
+	SEL sel = sel_registerName("setRenderingConfiguration:");
+	if (![holder respondsToSelector:sel]) return;
+	objc_setAssociatedObject(holder, KEY("lgfix_islandConfigForced"), sIslandRendered ? holder : nil, OBJC_ASSOCIATION_ASSIGN);
+	((void (*)(id, SEL, LGIslandRenderingConfiguration))objc_msgSend)(holder, sel, config);
+}
+
+// The curtain's gain layer enlarged around its centre until its edge is off screen. Kill switch:
+// CTLDIR/keep-cutout-edge (the thin ring around the camera pill stays)
+static void islandSetCurtainWide(UIView *curtain, BOOL wide) {
+	if (!curtain) return;
+	if (wide && access(CTLDIR "/keep-cutout-edge", F_OK) == 0) wide = NO;
+	BOOL was = objc_getAssociatedObject(curtain, KEY("lgfix_islandCurtainWide")) != nil;
+	if (wide == was) return;
+	if (wide) {
+		CGSize size = [curtain bounds].size;
+		CGSize screen = [[UIScreen mainScreen] bounds].size;
+		CGFloat shortest = MAX(1.0, MIN(size.width, size.height));
+		CGFloat scale = MAX(4.0, 2.4 * MAX(screen.width, screen.height) / shortest);
+		[[curtain layer] setSublayerTransform:CATransform3DMakeScale(scale, scale, 1.0)];
+	} else {
+		[[curtain layer] setSublayerTransform:CATransform3DIdentity];
+	}
+	objc_setAssociatedObject(curtain, KEY("lgfix_islandCurtainWide"), wide ? curtain : nil, OBJC_ASSOCIATION_ASSIGN);
+}
+
 // The black pill over the camera cutout (_SBSystemApertureMagiciansCurtainView, one in each island window).
 // On the display the hardware sits there; in a screenshot it is a black bar in the middle of the glass
-// island. With DynamicIsland.ClearCutout on it is left out (empty mask) for as long as the island is glass.
+// island. With DynamicIsland.ClearCutout on it is left out (empty mask, gain layer edge moved off screen), on
+// the glass island and, together with the rendering configuration above, while the island rests.
 // Kill switch: CTLDIR/keep-cutout
 static NSHashTable *sIslandCurtains;
 static CFAbsoluteTime sIslandCurtainScan;
@@ -771,6 +844,8 @@ static void islandSetCutoutClear(BOOL clear) {
 	for (UIView *curtain in [sIslandCurtains allObjects]) {
 		BOOL was = objc_getAssociatedObject(curtain, KEY("lgfix_islandMask")) != nil;
 		islandSetFill(curtain, clear, NO);
+		islandSetCurtainWide(curtain, clear);
+		islandSyncConfig(curtain);
 		BOOL is = objc_getAssociatedObject(curtain, KEY("lgfix_islandMask")) != nil;
 		if (was != is) flog("island: camera pill %s (%.0fx%.0f)", is ? "left out" : "back", [curtain bounds].size.width, [curtain bounds].size.height);
 	}
@@ -976,15 +1051,43 @@ static void islandUpdate(id object) {
 	UIView *tint = objc_getAssociatedObject(container, KEY("lgfix_islandTint"));
 	if (!enabled || !expanded) {
 		[tint setHidden:YES];
+		// With "Clear Camera Pill" on, the resting island gives up its black too: only the two hardware
+		// cutouts stay. Re-applied on every layout.
+		BOOL restClear = enabled && islandClearCutoutWanted();
+		BOOL wasRestClear = objc_getAssociatedObject(container, KEY("lgfix_islandRestClear")) != nil;
+		UIView *bodyGain = ivarObject(container, "_gainMapView");
 		if (glass && ![glass isHidden]) {
 			[glass setHidden:YES];
 			CALayer *presentation = [[container layer] presentationLayer];
 			vlog("island: stock look restored, model %.0fx%.0f on screen %.0fx%.0f", size.width, size.height,
 			     presentation ? [presentation bounds].size.width : -1.0, presentation ? [presentation bounds].size.height : -1.0);
+			// For the clear resting pill nothing black is handed back: restoring it and hiding it again in
+			// the same pass still showed for a moment on the display
+			if (!restClear) {
+				islandSetFillsHidden(window, NO);
+				islandSetContainerFillsHidden(container, NO);
+				islandSetCutoutClear(NO);
+			}
+			islandSetElementAdapted(container, NO);
+		}
+		if (restClear) {
+			sIslandRendered = YES;
+			islandSetFillsHidden(window, YES);
+			islandSetContainerFillsHidden(container, YES);
+			islandSyncConfig(bodyGain);
+			islandSetCutoutClear(YES);
+			if (!wasRestClear) {
+				objc_setAssociatedObject(container, KEY("lgfix_islandRestClear"), container, OBJC_ASSOCIATION_ASSIGN);
+				flog("island: resting pill cleared, hook=%d", sIslandSetConfigOrig != NULL);
+			}
+		} else if (wasRestClear || sIslandRendered) {
+			sIslandRendered = NO;
 			islandSetFillsHidden(window, NO);
 			islandSetContainerFillsHidden(container, NO);
-			islandSetElementAdapted(container, NO);
+			islandSyncConfig(bodyGain);
 			islandSetCutoutClear(NO);
+			objc_setAssociatedObject(container, KEY("lgfix_islandRestClear"), nil, OBJC_ASSOCIATION_ASSIGN);
+			flog("island: resting pill back to the system's");
 		}
 		return;
 	}
@@ -1363,6 +1466,7 @@ static void registerHandlers(void (*reg)(const char *, LGFixHandler)) {
 static void installHooks(int (*hook)(const char *, const char *), const char *why) {
 	flog("%s: island=%d element=%d", why, hook("SBSystemApertureContainerView", "island"),
 	     hook("SAUIElementView", "island.element"));
+	islandConfigInstall();
 	flog("%s: widgetFill=%d list=%d", why, hook("CHUISWidgetHostViewControllerView", "widget.fill"),
 	     hook("SBIconListView", "widget.list"));
 	@try {
