@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v87"
+#define BUILD_TAG "v86"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -744,8 +744,7 @@ static void islandSetFillsHidden(UIView *window, BOOL hidden) {
 
 // The black pill over the camera cutout (_SBSystemApertureMagiciansCurtainView, one in each island window).
 // On the display the hardware sits there; in a screenshot it is a black bar in the middle of the glass
-// island. With DynamicIsland.ClearCutout on it is left out (empty mask), also while the island rests (there
-// the black between the two cutouts only shows on the display).
+// island. With DynamicIsland.ClearCutout on it is left out (empty mask) for as long as the island is glass.
 // Kill switch: CTLDIR/keep-cutout
 static NSHashTable *sIslandCurtains;
 static CFAbsoluteTime sIslandCurtainScan;
@@ -977,28 +976,15 @@ static void islandUpdate(id object) {
 	UIView *tint = objc_getAssociatedObject(container, KEY("lgfix_islandTint"));
 	if (!enabled || !expanded) {
 		[tint setHidden:YES];
-		// With "Clear Camera Pill" on, the resting island gives up its black too: no glass there, only the
-		// two hardware cutouts stay. Same views as in the glass state, re-applied on every layout.
-		BOOL restClear = enabled && islandClearCutoutWanted();
-		BOOL wasGlass = glass && ![glass isHidden];
-		BOOL wasRestClear = objc_getAssociatedObject(container, KEY("lgfix_islandRestClear")) != nil;
-		if (wasGlass) {
+		if (glass && ![glass isHidden]) {
 			[glass setHidden:YES];
 			CALayer *presentation = [[container layer] presentationLayer];
 			vlog("island: stock look restored, model %.0fx%.0f on screen %.0fx%.0f", size.width, size.height,
 			     presentation ? [presentation bounds].size.width : -1.0, presentation ? [presentation bounds].size.height : -1.0);
-			islandSetElementAdapted(container, NO);
-		}
-		if (restClear) {
-			islandSetFillsHidden(window, YES);
-			islandSetContainerFillsHidden(container, YES);
-			islandSetCutoutClear(YES);
-			if (!wasRestClear) objc_setAssociatedObject(container, KEY("lgfix_islandRestClear"), container, OBJC_ASSOCIATION_ASSIGN);
-		} else if (wasGlass || wasRestClear) {
 			islandSetFillsHidden(window, NO);
 			islandSetContainerFillsHidden(container, NO);
+			islandSetElementAdapted(container, NO);
 			islandSetCutoutClear(NO);
-			objc_setAssociatedObject(container, KEY("lgfix_islandRestClear"), nil, OBJC_ASSOCIATION_ASSIGN);
 		}
 		return;
 	}

@@ -68,7 +68,7 @@ static NSArray *dynamicIslandItems(void) {
 	[specular setObject:[NSNumber numberWithBool:YES] forKey:S("enabled_default")];
 
 	NSMutableDictionary *cutout = [item("switch", "Clear Camera Pill",
-	                                    "Leaves out the black pill over the camera, on the glass island and while the island rests. Only the two camera cutouts stay. Off keeps the standard black pill.") mutableCopy];
+	                                    "Leaves out the black pill over the camera while the island is glass. It only shows in screenshots and recordings. Off keeps the standard black pill.") mutableCopy];
 	[cutout setObject:S("DynamicIsland.ClearCutout") forKey:S("key")];
 	[cutout setObject:[NSNumber numberWithBool:NO] forKey:S("default")];
 	[cutout setObject:S("DynamicIsland.Enabled") forKey:S("enabled_key")];

@@ -56,7 +56,7 @@ Not available on iOS 13: App Library, iOS 14 widgets, widget background removal,
 The original tweak cannot be rebuilt for arm64e on the development phone, so the fixes are four extra libraries that load next to the unchanged original 0.1.1-2b (sources in `rootless-addon/`). Releases ship them as a patch package to install on top of the original; `rootless-full/build.sh` can still put them into one package together with the original's binaries. On every supported iOS version the keyboard keys get the same shape in every app (the key radius is taken from the settings file, also in sandboxed apps). On iOS 15 and 16 the Control Center fixes apply: an expanded module that is one big slider (WhitePointModule) is a pill as a whole instead of a pill slider on a squarer glass, no white fill on switched-on toggles, Now Playing glass. For iOS 17:
 
 - volume HUD glass (the original hooks a class that no longer exists on iOS 17)
-- Dynamic Island glass while the island is expanded, with its own settings page; the audio wave of the now-playing element is drawn without its black box, and a setting can leave out the black camera pill, also while the island rests
+- Dynamic Island glass while the island is expanded, with its own settings page; the audio wave of the now-playing element is drawn without its black box, and a setting can leave out the black camera pill that otherwise shows in screenshots
 - expanded Control Center modules that are one big slider no longer show two outlines
 - home screen icons stay visible behind the cover sheet glass while unlocked (off by default, switch `icons-behind`)
 - widgets on the widget page fill their slot when a grid tweak shrinks them
