@@ -1,8 +1,8 @@
 Package: com.supremeinspirit.liquidassreworked
-Name: Liquid (Gl)ass Reworked fixes (test20)
-Version: 4~test20
+Name: Liquid (Gl)ass Reworked fixes (test21)
+Version: 4~test21
 Architecture: iphoneos-arm64
-Description: The Reworked test20 fixes (test19 + the Dynamic Island glass no longer flickers when the island opens: it stays a pill with one refraction while the island grows and keeps its capture scale; test18/19 = "Clear Camera Pill" also clears the resting Dynamic Island, liquid glass on the text loupe and on search fields / Safari's address bar, with the settings pages "Text Loupe" and "Text Bars") as an add-on for the original Liquid (Gl)ass 0.1.1-2b by dylv (winaviation-tweaks). Install it on top of the original. arm64, rootless.
+Description: The Reworked test21 fixes (test20 + the Dynamic Island glass keeps the card shape when the island opens into the player or another card, instead of becoming an ellipse; test19/20 = the island glass opens without flicker; test18 = "Clear Camera Pill" also clears the resting Dynamic Island, liquid glass on the text loupe and on search fields / Safari's address bar, with the settings pages "Text Loupe" and "Text Bars") as an add-on for the original Liquid (Gl)ass 0.1.1-2b by dylv (winaviation-tweaks). Install it on top of the original. arm64, rootless.
 Maintainer: supremeinspirit
 Author: supremeinspirit (fixes), dylv (original Liquid (Gl)ass)
 Section: Tweaks

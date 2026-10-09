@@ -72,6 +72,8 @@ New in test19 (rootless, iOS 17): with Clear Camera Pill on, the island's glass 
 
 New in test20 (rootless, iOS 17): the island's glass no longer flickers each time the island opens. The system moves the island's corner radius behind its size, so the glass was no pill for a moment and changed its refraction on the way; it is now the pill of the size the island is heading for, and its capture scale is held in every case.
 
+New in test21 (rootless, iOS 17): fixes a fault of test20. When the island opened from a pill into a card (the player, a call), the glass took half of the card's height as its corner radius and became an ellipse. The pill rule now only applies while the size the island is heading for is itself a pill.
+
 ---
 
 # Original README

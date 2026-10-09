@@ -27,7 +27,9 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v101"
+#define BUILD_TAG "v102"
+// The island's pill states are 37 and 57 pt high; everything taller is a card with its own corner radius
+#define ISLAND_PILL_MAX_HEIGHT 72.0
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -1182,7 +1184,9 @@ static void islandUpdate(id object) {
 	if (access(CTLDIR "/no-island-pill-radius", F_OK) != 0) {
 		CALayer *onScreen = [[container layer] presentationLayer];
 		CGSize shown = onScreen ? [onScreen bounds].size : size;
-		if ([[container layer] cornerRadius] >= MIN(shown.width, shown.height) * 0.5 - 1.5)
+		// Only between pill sizes: when the island opens into a card (player, call), the size it is heading for
+		// is no pill, and half of its shorter side would round the card into an ellipse.
+		if (MIN(size.width, size.height) <= ISLAND_PILL_MAX_HEIGHT && [[container layer] cornerRadius] >= MIN(shown.width, shown.height) * 0.5 - 1.5)
 			radius = MIN(size.width, size.height) * 0.5;
 	}
 	// The renderer draws a directional highlight on the outermost ring of the glass; at the island's size it
