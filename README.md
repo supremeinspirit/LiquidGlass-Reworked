@@ -68,6 +68,8 @@ New in test17 (rootless): liquid glass on the **text loupe** (the lens shown whi
 
 New in test18 (rootless, iOS 17): **Clear Camera Pill** also clears the resting Dynamic Island. With the setting on, the black pill between the two camera cutouts is gone on the display as well, not only in screenshots; only the cutouts themselves stay.
 
+New in test19 (rootless, iOS 17): with Clear Camera Pill on, the island's glass no longer flickers when the island opens and closes. It fades in and out with the island's size change instead of appearing at once and standing over the cameras as a small pill for a moment, and it keeps its full capture scale while the island changes size.
+
 ---
 
 # Original README

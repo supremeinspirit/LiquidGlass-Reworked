@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v91"
+#define BUILD_TAG "v95"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -1011,6 +1011,18 @@ static UIColor *islandTintColor(void) {
 	return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:a / 255.0 * strength];
 }
 
+// With the clear resting pill the island changes between nothing and glass, which showed as a flicker when
+// the glass came and went at once. The glass (its clipping wrapper) is faded instead. Kill switch:
+// CTLDIR/no-island-fade
+static void islandFade(CALayer *layer, float from, float to) {
+	CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:S("opacity")];
+	[fade setFromValue:[NSNumber numberWithFloat:from]];
+	[fade setToValue:[NSNumber numberWithFloat:to]];
+	[fade setDuration:0.18];
+	[layer setOpacity:to];
+	[layer addAnimation:fade forKey:S("lgfix_islandFade")];
+}
+
 static void islandUpdate(id object) {
 	UIView *container = object;
 	sIslandContainer = container;
@@ -1026,7 +1038,9 @@ static void islandUpdate(id object) {
 	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
 	if (enabled && expanded) {
 		objc_setAssociatedObject(container, KEY("lgfix_islandLinger"), [NSNumber numberWithDouble:now + 0.7], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	} else if (enabled && glass && ![glass isHidden] && access(CTLDIR "/no-island-linger", F_OK) != 0) {
+	} else if (enabled && glass && ![glass isHidden] && access(CTLDIR "/no-island-linger", F_OK) != 0 && !islandClearCutoutWanted()) {
+		// (With the clear resting pill there is no black body to keep away: the glass fades out as soon as the
+		// island starts to shrink, instead of standing over the cameras as a small pill until the linger ends.)
 		double until = [objc_getAssociatedObject(container, KEY("lgfix_islandLinger")) doubleValue];
 		// The collapse can run longer than the fixed linger: as long as the island on screen is still larger
 		// than its resting size, the black body would show as a black pill shrinking.
@@ -1056,8 +1070,28 @@ static void islandUpdate(id object) {
 		BOOL restClear = enabled && islandClearCutoutWanted();
 		BOOL wasRestClear = objc_getAssociatedObject(container, KEY("lgfix_islandRestClear")) != nil;
 		UIView *bodyGain = ivarObject(container, "_gainMapView");
-		if (glass && ![glass isHidden]) {
-			[glass setHidden:YES];
+		UIView *fadeClip = objc_getAssociatedObject(container, KEY("lgfix_islandClip"));
+		BOOL fadingOut = objc_getAssociatedObject(container, KEY("lgfix_islandFadingOut")) != nil;
+		if (glass && ![glass isHidden] && !fadingOut) {
+			if (restClear && fadeClip && access(CTLDIR "/no-island-fade", F_OK) != 0) {
+				NSNumber *token = [NSNumber numberWithDouble:now];
+				objc_setAssociatedObject(container, KEY("lgfix_islandFadingOut"), token, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+				CALayer *shown = [[fadeClip layer] presentationLayer];
+				islandFade([fadeClip layer], shown ? [shown opacity] : 1.0f, 0.0f);
+				__weak UIView *weakContainer = container;
+				__weak UIView *weakGlass = glass;
+				__weak UIView *weakClip = fadeClip;
+				dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+					UIView *strong = weakContainer;
+					if (!strong || objc_getAssociatedObject(strong, KEY("lgfix_islandFadingOut")) != token) return;
+					objc_setAssociatedObject(strong, KEY("lgfix_islandFadingOut"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+					[weakGlass setHidden:YES];
+					[[weakClip layer] removeAnimationForKey:S("lgfix_islandFade")];
+					[[weakClip layer] setOpacity:1.0f];
+				});
+			} else {
+				[glass setHidden:YES];
+			}
 			CALayer *presentation = [[container layer] presentationLayer];
 			vlog("island: stock look restored, model %.0fx%.0f on screen %.0fx%.0f", size.width, size.height,
 			     presentation ? [presentation bounds].size.width : -1.0, presentation ? [presentation bounds].size.height : -1.0);
@@ -1068,9 +1102,12 @@ static void islandUpdate(id object) {
 				islandSetContainerFillsHidden(container, NO);
 				islandSetCutoutClear(NO);
 			}
-			islandSetElementAdapted(container, NO);
+			// The element's snapshot is taken of the black island and is cross-faded while the island shrinks:
+			// with the clear resting pill it stays adapted, otherwise its black shows during the collapse
+			if (!restClear) islandSetElementAdapted(container, NO);
 		}
 		if (restClear) {
+			islandSetElementAdapted(container, YES);
 			sIslandRendered = YES;
 			islandSetFillsHidden(window, YES);
 			islandSetContainerFillsHidden(container, YES);
@@ -1086,6 +1123,7 @@ static void islandUpdate(id object) {
 			islandSetContainerFillsHidden(container, NO);
 			islandSyncConfig(bodyGain);
 			islandSetCutoutClear(NO);
+			islandSetElementAdapted(container, NO);
 			objc_setAssociatedObject(container, KEY("lgfix_islandRestClear"), nil, OBJC_ASSOCIATION_ASSIGN);
 			flog("island: resting pill back to the system's");
 		}
@@ -1122,7 +1160,18 @@ static void islandUpdate(id object) {
 	CGRect glassFrame = CGRectInset(frame, -outset, -outset);
 	CGSize oldSize = [glass bounds].size;
 	BOOL resized = fabs(oldSize.width - glassFrame.size.width) > 0.5 || fabs(oldSize.height - glassFrame.size.height) > 0.5;
+	BOOL wasFadingOut = objc_getAssociatedObject(container, KEY("lgfix_islandFadingOut")) != nil;
+	BOOL appearing = [glass isHidden] || wasFadingOut || objc_getAssociatedObject(glass, KEY("lgfix_islandShownOnce")) == nil;
+	if (wasFadingOut) objc_setAssociatedObject(container, KEY("lgfix_islandFadingOut"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(glass, KEY("lgfix_islandShownOnce"), glass, OBJC_ASSOCIATION_ASSIGN);
 	[glass setHidden:NO];
+	if (appearing && islandClearCutoutWanted() && access(CTLDIR "/no-island-fade", F_OK) != 0) {
+		CALayer *shown = [[clip layer] presentationLayer];
+		islandFade([clip layer], wasFadingOut && shown ? [shown opacity] : 0.0f, 1.0f);
+	} else if (appearing) {
+		[[clip layer] removeAnimationForKey:S("lgfix_islandFade")];
+		[[clip layer] setOpacity:1.0f];
+	}
 	if (resized) [glass setFrame:glassFrame];
 	setContinuousCorners([glass layer], radius + outset);
 	[[glass layer] setMasksToBounds:YES];
@@ -1132,6 +1181,11 @@ static void islandUpdate(id object) {
 	// with Global.Quality 0.1) that is 8 pt of coarse dots, more than the outset cuts off; at scale 1 it is
 	// 2.5 pt and falls entirely into the clipped part.
 	if (access(CTLDIR "/no-island-scale", F_OK) != 0) {
+		// The glass picks its capture scale from its size again whenever it is laid out, and that layout ran
+		// after this function: the scale set here was replaced by the coarse one until the island's next
+		// layout, which showed as a flicker of the glass while the island changes size. Its layout is run
+		// first, so the scale set below is the one that stays.
+		@try { [clip layoutIfNeeded]; } @catch (id e) {}
 		@try {
 			id current = [[glass layer] valueForKey:S("scale")];
 			if (![current respondsToSelector:@selector(doubleValue)] || fabs([current doubleValue] - 1.0) > 0.01)
