@@ -39,6 +39,7 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `keep-cutout` | Dynamic Island: the black camera pill is never left out, whatever the "Clear Camera Pill" setting says |
 | `keep-cutout-edge` | Dynamic Island: with "Clear Camera Pill" on, the thin ring around the place of the pill is kept (the fix otherwise moves that edge off screen) |
 | `no-island-fade` | Dynamic Island: with "Clear Camera Pill" on, the glass appears and disappears at once instead of fading |
+| `no-island-pill-radius` | Dynamic Island: the glass takes the corner radius the system reports while the island grows, instead of the pill of the size it is heading for |
 | `no-loupe-glass` | no glass on the text loupe (takes effect when an app is next started) |
 | `no-searchfield-glass` | no glass on search fields and Safari's address bar (takes effect when an app is next started) |
 

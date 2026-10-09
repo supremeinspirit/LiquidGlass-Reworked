@@ -70,6 +70,8 @@ New in test18 (rootless, iOS 17): **Clear Camera Pill** also clears the resting 
 
 New in test19 (rootless, iOS 17): with Clear Camera Pill on, the island's glass no longer flickers when the island opens and closes. It fades in and out with the island's size change instead of appearing at once and standing over the cameras as a small pill for a moment, and it keeps its full capture scale while the island changes size.
 
+New in test20 (rootless, iOS 17): the island's glass no longer flickers each time the island opens. The system moves the island's corner radius behind its size, so the glass was no pill for a moment and changed its refraction on the way; it is now the pill of the size the island is heading for, and its capture scale is held in every case.
+
 ---
 
 # Original README

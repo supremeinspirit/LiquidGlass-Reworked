@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v95"
+#define BUILD_TAG "v101"
 #define MAX_SLOTS 12
 #define MAX_HANDLERS 24
 
@@ -1023,6 +1023,39 @@ static void islandFade(CALayer *layer, float from, float to) {
 	[layer addAnimation:fade forKey:S("lgfix_islandFade")];
 }
 
+// The original glass picks its capture scale from its size in every -applyFilters (layout, tracking, settings
+// reload), so the full scale the island glass needs was replaced by a coarse one between two island layouts:
+// the glass flickered while the island changed size. For glasses marked by islandUpdate the full scale is put
+// back in the same call, before anything is drawn. Kill switch: CTLDIR/no-island-scale
+static IMP sGlassApplyOrig;
+
+static void glassApplyFilters(id self, SEL _cmd) {
+	if (sGlassApplyOrig) ((void (*)(id, SEL))sGlassApplyOrig)(self, _cmd);
+	if (!objc_getAssociatedObject(self, KEY("lgfix_islandScaleOne"))) return;
+	@try {
+		id current = [[(UIView *)self layer] valueForKey:S("scale")];
+		if (![current respondsToSelector:@selector(doubleValue)] || fabs([current doubleValue] - 1.0) > 0.01)
+			[[(UIView *)self layer] setValue:[NSNumber numberWithDouble:1.0] forKey:S("scale")];
+	} @catch (id e) {}
+}
+
+static void glassScaleInstall(void) {
+	static BOOL tried;
+	if (tried) return;
+	tried = YES;
+	if (getenv("LGFIX_GLASSSCALEHOOK")) return;   // an earlier build owns the hook
+	Class cls = objc_getClass("LGLiveBackdropView");
+	SEL sel = sel_registerName("applyFilters");
+	unsigned int count = 0;
+	Method *methods = cls ? class_copyMethodList(cls, &count) : NULL;
+	for (unsigned int m = 0; m < count; m++)
+		if (method_getName(methods[m]) == sel)
+			sGlassApplyOrig = method_setImplementation(methods[m], (IMP)glassApplyFilters);
+	free(methods);
+	if (sGlassApplyOrig) setenv("LGFIX_GLASSSCALEHOOK", BUILD_TAG, 1);
+	flog("island: glass capture scale hook installed=%d", sGlassApplyOrig != NULL);
+}
+
 static void islandUpdate(id object) {
 	UIView *container = object;
 	sIslandContainer = container;
@@ -1141,6 +1174,17 @@ static void islandUpdate(id object) {
 	}
 	CGFloat radius = [[container layer] cornerRadius];
 	if (radius <= 0.0 || radius > MIN(size.width, size.height) * 0.5) radius = MIN(size.width, size.height) * 0.5;
+	// The system moves the island's corner radius step by step and behind the size: while the island grows
+	// from 37 to 57 pt, the radius read here is still the small one, so the glass was no pill for a moment and
+	// took other refraction filters on the way (r16 -> r12 -> r15 -> r16), which showed as a flicker every
+	// time the island opened. As long as what is on screen is a pill, the glass is the pill of the size the
+	// island is heading for. Kill switch: CTLDIR/no-island-pill-radius
+	if (access(CTLDIR "/no-island-pill-radius", F_OK) != 0) {
+		CALayer *onScreen = [[container layer] presentationLayer];
+		CGSize shown = onScreen ? [onScreen bounds].size : size;
+		if ([[container layer] cornerRadius] >= MIN(shown.width, shown.height) * 0.5 - 1.5)
+			radius = MIN(size.width, size.height) * 0.5;
+	}
 	// The renderer draws a directional highlight on the outermost ring of the glass; at the island's size it
 	// shows as a dotted line at the top left. The glass is made a little larger than the island and clipped
 	// to the island's shape by a wrapper view, which cuts that ring off.
@@ -1180,7 +1224,11 @@ static void islandUpdate(id object) {
 	// The highlight ring is up to 2.5 capture pixels wide. At the stock capture scale for this size (about 0.3
 	// with Global.Quality 0.1) that is 8 pt of coarse dots, more than the outset cuts off; at scale 1 it is
 	// 2.5 pt and falls entirely into the clipped part.
-	if (access(CTLDIR "/no-island-scale", F_OK) != 0) {
+	BOOL scaleOne = access(CTLDIR "/no-island-scale", F_OK) != 0;
+	if (scaleOne) glassScaleInstall();
+	if (scaleOne != (objc_getAssociatedObject(glass, KEY("lgfix_islandScaleOne")) != nil))
+		objc_setAssociatedObject(glass, KEY("lgfix_islandScaleOne"), scaleOne ? glass : nil, OBJC_ASSOCIATION_ASSIGN);
+	if (scaleOne) {
 		// The glass picks its capture scale from its size again whenever it is laid out, and that layout ran
 		// after this function: the scale set here was replaced by the coarse one until the island's next
 		// layout, which showed as a flicker of the glass while the island changes size. Its layout is run
