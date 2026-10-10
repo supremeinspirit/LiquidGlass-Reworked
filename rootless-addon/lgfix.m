@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v105"
+#define BUILD_TAG "v111"
 // The island's pill states are 37 and 57 pt high; everything taller is a card with its own corner radius
 #define ISLAND_PILL_MAX_HEIGHT 72.0
 #define MAX_SLOTS 12
@@ -471,8 +471,22 @@ static void ccContainerPillSettle(UIView *container) {
 
 static void ccMediaStyleUpdate(id object);
 
+static void ccSliderFillUpdate(UIView *slider);
+
+// Every slider in a module: the volume module holds two, and its sliders are resized by the module without a
+// layout pass of their own, so the slider handler alone missed them when the module opens or closes
+static void ccContainerSliderFills(UIView *view, Class sliderClass, int depth) {
+	if (depth > 6) return;
+	for (UIView *sub in [view subviews]) {
+		if ([sub isKindOfClass:sliderClass]) { @try { ccSliderFillUpdate(sub); } @catch (id e) {} continue; }
+		ccContainerSliderFills(sub, sliderClass, depth + 1);
+	}
+}
+
 static void ccContainerUpdate(id object) {
 	if (sLegacyOS) { ccContainerPillSettle(object); return; }
+	Class sliderClass = objc_getClass("CCUIContinuousSliderView");
+	if (sliderClass) ccContainerSliderFills(object, sliderClass, 0);
 	ccMediaStyleUpdate(object);
 	UIView *container = object;
 	UIView *glass = directSubviewOfClass(container, "LGLiveBackdropView");
@@ -501,8 +515,140 @@ static void ccContainerUpdate(id object) {
 
 static void ccSliderGlyphUpdate(UIView *slider);
 
+// The slider's white fill (_backgroundFillView, a material inside the clipping view that shows the value) is a pill
+// like the slider. While a slider module opens or closes, its layer carries a cornerRadius animation that is
+// marked additive but holds the radius itself as both start and end value (measured: from 75 to 75 when opening,
+// 38.7 to 38.7 when closing; the glass beside it has the right one, from -36.3 to 0). So for the length of the
+// animation the fill's radius on screen is twice the pill radius, more than half its width and height, and its
+// round ends are drawn in to points. The animation is replaced by a copy that runs from the difference between
+// the old and the new pill radius to 0, taken from the layer's own size animation. The slider's hidden
+// background material has the same fault and gets the same correction. Kill switch
+// CTLDIR/keep-slider-fill-animation.
+static void ccSliderFillFixLayer(CALayer *layer) {
+	NSString *key = S("cornerRadius");
+	CABasicAnimation *radius = (CABasicAnimation *)[layer animationForKey:key];
+	if (![radius isKindOfClass:[CABasicAnimation class]] || ![radius isAdditive]) return;
+	id from = [radius fromValue], to = [radius toValue];
+	if (![from isKindOfClass:[NSNumber class]] || ![to isKindOfClass:[NSNumber class]]) return;
+	// the faulty one: additive, yet it never changes and is not zero
+	if (fabs([from doubleValue] - [to doubleValue]) > 0.01 || fabs([to doubleValue]) < 0.5) return;
+	CGSize now = [layer bounds].size;
+	double delta = 0.0;
+	CABasicAnimation *size = (CABasicAnimation *)[layer animationForKey:S("bounds.size")];
+	BOOL pill = fabs([layer cornerRadius] - MIN(now.width, now.height) * 0.5) < 1.0;
+	if (pill && [size isKindOfClass:[CABasicAnimation class]] && [size isAdditive] && [[size fromValue] isKindOfClass:[NSValue class]]) {
+		CGSize d = [[size fromValue] CGSizeValue];
+		delta = MIN(now.width + d.width, now.height + d.height) * 0.5 - MIN(now.width, now.height) * 0.5;
+	}
+	CABasicAnimation *fixed = [radius copy];
+	[fixed setFromValue:[NSNumber numberWithDouble:delta]];
+	[fixed setToValue:[NSNumber numberWithDouble:0.0]];
+	// The faulty values come from the original itself: its -[CALayer addAnimation:forKey:] sets from and to of
+	// every cornerRadius animation to the radius it keeps on the layer, additive or not. It would do the same
+	// to this one, so its number is taken off the layer for the moment of adding. Without that number's key
+	// (original not loaded, or built differently) nothing is changed.
+	const void *lock = ccDesiredRadiusKey(layer);
+	id locked = lock ? objc_getAssociatedObject(layer, lock) : nil;
+	if (dlsym(RTLD_DEFAULT, "LGInstallRegisteredGlassInMaterial") && !locked) return;
+	if (locked) objc_setAssociatedObject(layer, lock, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	[layer addAnimation:fixed forKey:key];
+	if (locked) objc_setAssociatedObject(layer, lock, locked, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	// did it stay as written?
+	CABasicAnimation *check = (CABasicAnimation *)[layer animationForKey:key];
+	BOOL held = [check isKindOfClass:[CABasicAnimation class]] && fabs([[check fromValue] doubleValue] - delta) < 0.01
+	         && fabs([[check toValue] doubleValue]) < 0.01;
+	static int logged;
+	if (logged < 8) {
+		logged++;
+		UIView *owner = [[layer delegate] isKindOfClass:[UIView class]] ? (UIView *)[layer delegate] : nil;
+		UIView *slider = owner;
+		Class sliderClass = objc_getClass("CCUIBaseSliderView");
+		for (int i = 0; slider && i < 6 && !(sliderClass && [slider isKindOfClass:sliderClass]); i++) slider = [slider superview];
+		flog("cc: slider fill's radius animation corrected (was %.1f to %.1f additive, now %.1f to 0; fill %.0fx%.0f in %s at x %.0f; held=%d)",
+		     [from doubleValue], [to doubleValue], delta, now.width, now.height, cname(slider),
+		     owner ? [owner convertPoint:CGPointZero toView:nil].x : -1.0, held);
+	}
+}
+
+static void glassScaleInstall(void);
+
+// The slider's own glass: the original's glass view that lies beside the slider's (hidden) background material
+// in the same size. The original picks the capture scale from the size: 0.75 for the small slider, about 0.37
+// for the expanded one (measured). The renderer's highlight ring is a fixed number of capture pixels wide, so
+// on the expanded slider it was more than twice as coarse and showed as a line at the top left. The glass keeps
+// 0.75 at every size. Kill switch CTLDIR/no-slider-scale.
+static void ccSliderGlassScale(UIView *slider) {
+	static int off = -1;
+	if (off < 0) off = access(CTLDIR "/no-slider-scale", F_OK) == 0;
+	Class glassClass = objc_getClass("LGLiveBackdropView");
+	UIView *background = ivarObject(slider, "_backgroundView");
+	if (off || !glassClass || ![background isKindOfClass:[UIView class]]) return;
+	CGSize own = [slider bounds].size;
+	if (own.width < 30.0 || own.width > 260.0 || own.height > 520.0) return;   // a slider module, not something screen-sized
+	for (UIView *sub in [[background superview] subviews]) {
+		if (![sub isKindOfClass:glassClass]) continue;
+		CGSize size = [sub bounds].size;
+		if (fabs(size.width - own.width) > 2.0 || fabs(size.height - own.height) > 2.0) continue;
+		glassScaleInstall();
+		if (!objc_getAssociatedObject(sub, KEY("lgfix_glassScale")))
+			objc_setAssociatedObject(sub, KEY("lgfix_glassScale"), [NSNumber numberWithDouble:0.75], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		@try {
+			CALayer *layer = [sub layer];
+			id current = [layer valueForKey:S("scale")];
+			double found = [current respondsToSelector:@selector(doubleValue)] ? [current doubleValue] : -1.0;
+			if (fabs(found - 0.75) > 0.01) {
+				[layer setValue:[NSNumber numberWithDouble:0.75] forKey:S("scale")];
+				static int logged;
+				if (logged < 4) {
+					logged++;
+					flog("cc: slider glass %.0fx%.0f had capture scale %.2f, held at 0.75", size.width, size.height, found);
+				}
+			}
+			if ([layer animationForKey:S("scale")]) [layer removeAnimationForKey:S("scale")];
+		} @catch (id e) {}
+	}
+}
+
+static void ccSliderFillApply(UIView *slider) {
+	@try { ccSliderGlassScale(slider); } @catch (id e) {}
+	UIView *fill = ivarObject(slider, "_backgroundFillView");
+	if ([fill isKindOfClass:[UIView class]]) ccSliderFillFixLayer([fill layer]);
+	UIView *background = ivarObject(slider, "_backgroundView");
+	if ([background isKindOfClass:[UIView class]]) ccSliderFillFixLayer([background layer]);
+}
+
+static void ccSliderFillObserved(CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *info) {
+	UIView *slider = (__bridge_transfer UIView *)info;
+	@try { ccSliderFillApply(slider); } @catch (id e) {}
+}
+
+static void ccSliderFillUpdate(UIView *slider) {
+	static int keep = -1;
+	if (keep < 0) keep = access(CTLDIR "/keep-slider-fill-animation", F_OK) == 0;
+	if (keep) return;
+	ccSliderFillApply(slider);
+	// The animation may be added after this layout pass (the fill's own layout, the original's rounding): look
+	// again at the end of this run loop turn, before Core Animation commits (its observer has order 2000000),
+	// so the faulty one is never drawn, and once more on the next turn.
+	CFRunLoopObserverContext context = { 0, (__bridge_retained void *)slider, NULL, NULL, NULL };
+	CFRunLoopObserverRef observer = CFRunLoopObserverCreate(NULL, kCFRunLoopBeforeWaiting | kCFRunLoopExit, false, 1999000,
+	                                                        ccSliderFillObserved, &context);
+	if (observer) {
+		CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+		CFRelease(observer);
+	} else {
+		CFRelease(context.info);
+	}
+	__weak UIView *weakSlider = slider;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		UIView *strong = weakSlider;
+		if (strong) @try { ccSliderFillApply(strong); } @catch (id e) {}
+	});
+}
+
 static void ccSliderUpdate(id object) {
 	if (!sLegacyOS) @try { ccSliderGlyphUpdate(object); } @catch (id e) {}
+	if (!sLegacyOS) @try { ccSliderFillUpdate(object); } @catch (id e) {}
 	Class cls = objc_getClass("CCUIContentModuleContentContainerView");
 	if (!cls) return;
 	int level = 0;
@@ -1284,11 +1430,22 @@ static IMP sGlassApplyOrig;
 
 static void glassApplyFilters(id self, SEL _cmd) {
 	if (sGlassApplyOrig) ((void (*)(id, SEL))sGlassApplyOrig)(self, _cmd);
-	if (!objc_getAssociatedObject(self, KEY("lgfix_islandScaleOne"))) return;
+	// island glass: 1.0; a glass with a number under lgfix_glassScale (Control Center sliders): that number
+	double want = 0.0;
+	BOOL slider = NO;
+	if (objc_getAssociatedObject(self, KEY("lgfix_islandScaleOne"))) want = 1.0;
+	else {
+		NSNumber *held = objc_getAssociatedObject(self, KEY("lgfix_glassScale"));
+		if ([held isKindOfClass:[NSNumber class]]) { want = [held doubleValue]; slider = YES; }
+	}
+	if (want <= 0.0) return;
 	@try {
-		id current = [[(UIView *)self layer] valueForKey:S("scale")];
-		if (![current respondsToSelector:@selector(doubleValue)] || fabs([current doubleValue] - 1.0) > 0.01)
-			[[(UIView *)self layer] setValue:[NSNumber numberWithDouble:1.0] forKey:S("scale")];
+		CALayer *layer = [(UIView *)self layer];
+		id current = [layer valueForKey:S("scale")];
+		if (![current respondsToSelector:@selector(doubleValue)] || fabs([current doubleValue] - want) > 0.01)
+			[layer setValue:[NSNumber numberWithDouble:want] forKey:S("scale")];
+		// inside an animation the original's change of the scale is animated; nothing is to change any more
+		if (slider && [layer animationForKey:S("scale")]) [layer removeAnimationForKey:S("scale")];
 	} @catch (id e) {}
 }
 
@@ -1865,6 +2022,33 @@ int lgfix_cctest2(const char *path) {
 			fprintf(f, "# late glyph: hooks %d %d, cuts %d (own %d), filter=%s, copy masked=%d\n", sGlyphSetActiveOrig != NULL,
 			        sGlyphPunchOrig != NULL, testPunched([lglyph layer]), own, lname ? [lname UTF8String] : "-", [[copy layer] mask] != nil);
 			if (lname && testPunched([lglyph layer]) == own && [[copy layer] mask]) result += 100000;
+		}
+
+		// fill animation: the additive from == to radius animation is replaced by one from the size difference to 0;
+		// a correct one is left alone
+		{
+			CALayer *layer = [CALayer layer];
+			[layer setBounds:CGRectMake(0, 0, 150, 400)];
+			[layer setCornerRadius:75];
+			CASpringAnimation *size = [CASpringAnimation animationWithKeyPath:S("bounds.size")];
+			[size setAdditive:YES];
+			[size setFromValue:[NSValue valueWithCGSize:CGSizeMake(-72.666, -242)]];
+			[size setToValue:[NSValue valueWithCGSize:CGSizeZero]];
+			[layer addAnimation:size forKey:S("bounds.size")];
+			CASpringAnimation *bad = [CASpringAnimation animationWithKeyPath:S("cornerRadius")];
+			[bad setAdditive:YES];
+			[bad setFromValue:[NSNumber numberWithDouble:75]];
+			[bad setToValue:[NSNumber numberWithDouble:75]];
+			[bad setDuration:0.4];
+			[layer addAnimation:bad forKey:S("cornerRadius")];
+			ccSliderFillFixLayer(layer);
+			CABasicAnimation *now = (CABasicAnimation *)[layer animationForKey:S("cornerRadius")];
+			double f1 = [[now fromValue] doubleValue], t1 = [[now toValue] doubleValue];
+			ccSliderFillFixLayer(layer);
+			CABasicAnimation *again = (CABasicAnimation *)[layer animationForKey:S("cornerRadius")];
+			fprintf(f, "# fill animation %s from %.2f to %.2f additive=%d dur=%.2f, second pass from %.2f\n", cname(now), f1, t1,
+			        [now isAdditive], [now duration], [[again fromValue] doubleValue]); fflush(f);
+			if (fabs(f1 + 36.333) < 0.01 && fabs(t1) < 0.001 && [now isAdditive] && fabs([[again fromValue] doubleValue] - f1) < 0.001) result += 1000000;
 		}
 
 		UIImage *image = [UIImage systemImageNamed:S("moon.fill")];

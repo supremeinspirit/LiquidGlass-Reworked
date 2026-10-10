@@ -43,6 +43,8 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `no-island-pill-radius` | Dynamic Island: the glass takes the corner radius the system reports while the island grows, instead of the pill of the size it is heading for |
 | `keep-focus-white` | Control Center, iOS 17: the Focus module keeps the white circle behind its glyph while a Focus is on |
 | `keep-focus-circle` | Control Center, iOS 17: the Focus module keeps the round glass background behind its glyph |
+| `keep-slider-fill-animation` | Control Center, iOS 17: the white fill of a slider keeps the original's corner radius animation (its round ends are drawn in to points while a slider module opens or closes); with this file the capture scale of the next row is not held either |
+| `no-slider-scale` | Control Center, iOS 17: the glass of an expanded slider gets the lower capture scale the original picks for its size (a line shows at its top left) |
 | `keep-slider-glyphs` | Control Center, iOS 17: the brightness and volume sliders keep their punched-out (dark) glyphs instead of the yellow sun and blue speaker |
 | `keep-callwave-frame` | Dynamic Island: the call's audio waves keep the dark box behind them (takes effect when InCallService next starts) |
 | `no-loupe-glass` | no glass on the text loupe (takes effect when an app is next started) |

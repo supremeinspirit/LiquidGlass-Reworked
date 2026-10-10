@@ -78,6 +78,8 @@ New in test22 (rootless, iOS 17): Control Center and calls. The brightness and v
 
 New in test23 (rootless, iOS 17): the Control Center Focus module shows its glyph without the round background behind it, with a Focus on or off, like the entries of the Focus list.
 
+New in test29 (rootless, iOS 17): Control Center sliders. While a slider module (volume, brightness, a module that is one slider) opens or closes, the round ends of the white fill were drawn in to points: the original sets start and end of every corner radius animation on these layers to the radius itself, also on the additive animations the system uses, which doubled the radius for the length of the animation. The fix puts a correct animation in its place. The glass of an expanded slider also keeps the capture scale of the small one, which removes a line at its top left.
+
 ---
 
 # Original README
