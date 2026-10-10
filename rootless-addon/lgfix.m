@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v104"
+#define BUILD_TAG "v105"
 // The island's pill states are 37 and 57 pt high; everything taller is a card with its own corner radius
 #define ISLAND_PILL_MAX_HEIGHT 72.0
 #define MAX_SLOTS 12
@@ -559,26 +559,35 @@ static BOOL ccInFocusModule(UIView *view) {
 	return found;
 }
 
+static void ccFocusSetMasked(UIView *view, BOOL masked) {
+	if (![view isKindOfClass:[UIView class]]) return;
+	CALayer *mine = objc_getAssociatedObject(view, KEY("lgfix_focusCircleMask"));
+	if (masked && !mine && ![[view layer] mask]) {
+		CALayer *mask = [CALayer layer];
+		[[view layer] setMask:mask];
+		objc_setAssociatedObject(view, KEY("lgfix_focusCircleMask"), mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	} else if (!masked && mine) {
+		if ([[view layer] mask] == mine) [[view layer] setMask:nil];
+		objc_setAssociatedObject(view, KEY("lgfix_focusCircleMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+}
+
+// Also left out: the button's own round background (_normalStateBackgroundView, a material that carries the
+// original's glass), the disc behind the glyph while no Focus is on. The Focus list shows its glyphs without
+// one. Kill switch for this part alone: CTLDIR/keep-focus-circle.
 static void ccFocusButtonUpdate(id object) {
-	static int keep = -1;
+	static int keep = -1, keepCircle = -1;
 	if (keep < 0) keep = access(CTLDIR "/keep-focus-white", F_OK) == 0;
-	if (keep || !ccInFocusModule(object)) return;
+	if (keepCircle < 0) keepCircle = access(CTLDIR "/keep-focus-circle", F_OK) == 0;
+	if (!ccInFocusModule(object)) return;
 	UIView *circle = ivarObject(object, "_alternateSelectedStateBackgroundView");
 	UIView *material = ivarObject(object, "_normalStateBackgroundView");
-	if (![circle isKindOfClass:[UIView class]]) return;
 	BOOL want = !resolveLiquidAss() || pHostEnabled(S("ControlCenter"));
-	BOOL masked = objc_getAssociatedObject(circle, KEY("lgfix_focusCircleMask")) != nil;
-	if (want && !masked) {
-		CALayer *mask = [CALayer layer];
-		[[circle layer] setMask:mask];
-		objc_setAssociatedObject(circle, KEY("lgfix_focusCircleMask"), mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		if ([material isKindOfClass:[UIView class]]) [material setOverrideUserInterfaceStyle:UIUserInterfaceStyleDark];
-		flog("cc: Focus button's white circle left out");
-	} else if (!want && masked) {
-		[[circle layer] setMask:nil];
-		objc_setAssociatedObject(circle, KEY("lgfix_focusCircleMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		if ([material isKindOfClass:[UIView class]]) [material setOverrideUserInterfaceStyle:UIUserInterfaceStyleUnspecified];
-	}
+	BOOL had = objc_getAssociatedObject(circle, KEY("lgfix_focusCircleMask")) || objc_getAssociatedObject(material, KEY("lgfix_focusCircleMask"));
+	ccFocusSetMasked(circle, want && !keep);
+	ccFocusSetMasked(material, want && !keepCircle);
+	BOOL has = objc_getAssociatedObject(circle, KEY("lgfix_focusCircleMask")) || objc_getAssociatedObject(material, KEY("lgfix_focusCircleMask"));
+	if (has && !had) flog("cc: Focus button's background circles left out");
 }
 
 #pragma mark - Control Center brightness / volume sliders: coloured glyphs
@@ -1867,9 +1876,9 @@ int lgfix_cctest2(const char *path) {
 		ccFocusButtonUpdate(button);
 		UIView *circle = ivarObject(button, "_alternateSelectedStateBackgroundView");
 		UIView *material = ivarObject(button, "_normalStateBackgroundView");
-		fprintf(f, "# focus circle alpha=%.1f mask=%d material style=%ld\n", [circle alpha], [[circle layer] mask] != nil,
-		        (long)[material overrideUserInterfaceStyle]); fflush(f);
-		if ([[circle layer] mask] && [material overrideUserInterfaceStyle] == UIUserInterfaceStyleDark) result += 1000;
+		fprintf(f, "# focus circle alpha=%.1f mask=%d material mask=%d\n", [circle alpha], [[circle layer] mask] != nil,
+		        [[material layer] mask] != nil); fflush(f);
+		if ([[circle layer] mask] && [[material layer] mask]) result += 1000;
 		fclose(f);
 		return result;
 	}

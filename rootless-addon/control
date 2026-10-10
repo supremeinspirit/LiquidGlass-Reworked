@@ -1,8 +1,8 @@
 Package: com.supremeinspirit.liquidassreworked
-Name: Liquid (Gl)ass Reworked fixes (test22)
-Version: 4~test22
+Name: Liquid (Gl)ass Reworked fixes (test23)
+Version: 4~test23
 Architecture: iphoneos-arm64
-Description: The Reworked test22 fixes (test21 + Control Center: coloured brightness and volume slider glyphs, no white circle on an active Focus; Dynamic Island: no dark box behind the audio waves during a call, through the new library LiquidAssFixCall for InCallService; test21 = the Dynamic Island glass keeps the card shape when the island opens into the player or another card, instead of becoming an ellipse; test19/20 = the island glass opens without flicker; test18 = "Clear Camera Pill" also clears the resting Dynamic Island, liquid glass on the text loupe and on search fields / Safari's address bar, with the settings pages "Text Loupe" and "Text Bars") as an add-on for the original Liquid (Gl)ass 0.1.1-2b by dylv (winaviation-tweaks). Install it on top of the original. arm64, rootless.
+Description: The Reworked test23 fixes (test22 + no round background behind the glyph of the Control Center Focus module; test22 = Control Center: coloured brightness and volume slider glyphs, no white circle on an active Focus; Dynamic Island: no dark box behind the audio waves during a call, through the new library LiquidAssFixCall for InCallService; test21 = the Dynamic Island glass keeps the card shape when the island opens into the player or another card, instead of becoming an ellipse; test19/20 = the island glass opens without flicker; test18 = "Clear Camera Pill" also clears the resting Dynamic Island, liquid glass on the text loupe and on search fields / Safari's address bar, with the settings pages "Text Loupe" and "Text Bars") as an add-on for the original Liquid (Gl)ass 0.1.1-2b by dylv (winaviation-tweaks). Install it on top of the original. arm64, rootless.
 Maintainer: supremeinspirit
 Author: supremeinspirit (fixes), dylv (original Liquid (Gl)ass)
 Section: Tweaks

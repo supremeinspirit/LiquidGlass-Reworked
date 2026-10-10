@@ -42,6 +42,7 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `no-island-fade` | Dynamic Island: with "Clear Camera Pill" on, the glass appears and disappears at once instead of fading |
 | `no-island-pill-radius` | Dynamic Island: the glass takes the corner radius the system reports while the island grows, instead of the pill of the size it is heading for |
 | `keep-focus-white` | Control Center, iOS 17: the Focus module keeps the white circle behind its glyph while a Focus is on |
+| `keep-focus-circle` | Control Center, iOS 17: the Focus module keeps the round glass background behind its glyph |
 | `keep-slider-glyphs` | Control Center, iOS 17: the brightness and volume sliders keep their punched-out (dark) glyphs instead of the yellow sun and blue speaker |
 | `keep-callwave-frame` | Dynamic Island: the call's audio waves keep the dark box behind them (takes effect when InCallService next starts) |
 | `no-loupe-glass` | no glass on the text loupe (takes effect when an app is next started) |

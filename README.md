@@ -76,6 +76,8 @@ New in test21 (rootless, iOS 17): fixes a fault of test20. When the island opene
 
 New in test22 (rootless, iOS 17): Control Center and calls. The brightness and volume sliders show their glyphs in colour (yellow sun, blue speaker) instead of punched out of the fill. The Focus module no longer puts a white circle behind its glyph while a Focus is on. During a call, the dark box behind the audio waves in the Dynamic Island is gone; this part is a fifth library, `LiquidAssFixCall`, loaded into InCallService only (with Choicy blocking InCallService it has to be allowed there).
 
+New in test23 (rootless, iOS 17): the Control Center Focus module shows its glyph without the round background behind it, with a Focus on or off, like the entries of the Focus list.
+
 ---
 
 # Original README
