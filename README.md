@@ -53,7 +53,7 @@ Not available on iOS 13: App Library, iOS 14 widgets, widget background removal,
 
 ### Rootless package ([rootless-addon/](rootless-addon/), [rootless-full/](rootless-full/))
 
-The original tweak cannot be rebuilt for arm64e on the development phone, so the fixes are four extra libraries that load next to the unchanged original 0.1.1-2b (sources in `rootless-addon/`). Releases ship them as a patch package to install on top of the original; `rootless-full/build.sh` can still put them into one package together with the original's binaries. On every supported iOS version the keyboard keys get the same shape in every app (the key radius is taken from the settings file, also in sandboxed apps). On iOS 15 and 16 the Control Center fixes apply: an expanded module that is one big slider (WhitePointModule) is a pill as a whole instead of a pill slider on a squarer glass, no white fill on switched-on toggles, Now Playing glass. For iOS 17:
+The original tweak cannot be rebuilt for arm64e on the development phone, so the fixes are five extra libraries that load next to the unchanged original 0.1.1-2b (sources in `rootless-addon/`). Releases ship them as a patch package to install on top of the original; `rootless-full/build.sh` can still put them into one package together with the original's binaries. On every supported iOS version the keyboard keys get the same shape in every app (the key radius is taken from the settings file, also in sandboxed apps). On iOS 15 and 16 the Control Center fixes apply: an expanded module that is one big slider (WhitePointModule) is a pill as a whole instead of a pill slider on a squarer glass, no white fill on switched-on toggles, Now Playing glass. For iOS 17:
 
 - volume HUD glass (the original hooks a class that no longer exists on iOS 17)
 - Dynamic Island glass while the island is expanded, with its own settings page; the audio wave of the now-playing element is drawn without its black box, and the setting "Clear Camera Pill" leaves out the black pill over the camera, on the glass island and while the island rests
@@ -73,6 +73,8 @@ New in test19 (rootless, iOS 17): with Clear Camera Pill on, the island's glass 
 New in test20 (rootless, iOS 17): the island's glass no longer flickers each time the island opens. The system moves the island's corner radius behind its size, so the glass was no pill for a moment and changed its refraction on the way; it is now the pill of the size the island is heading for, and its capture scale is held in every case.
 
 New in test21 (rootless, iOS 17): fixes a fault of test20. When the island opened from a pill into a card (the player, a call), the glass took half of the card's height as its corner radius and became an ellipse. The pill rule now only applies while the size the island is heading for is itself a pill.
+
+New in test22 (rootless, iOS 17): Control Center and calls. The brightness and volume sliders show their glyphs in colour (yellow sun, blue speaker) instead of punched out of the fill. The Focus module no longer puts a white circle behind its glyph while a Focus is on. During a call, the dark box behind the audio waves in the Dynamic Island is gone; this part is a fifth library, `LiquidAssFixCall`, loaded into InCallService only (with Choicy blocking InCallService it has to be allowed there).
 
 ---
 

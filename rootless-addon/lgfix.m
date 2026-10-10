@@ -27,7 +27,7 @@
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
 #define OUTDIR "/var/mobile/Library/Accessibility/lgdiag"
-#define BUILD_TAG "v102"
+#define BUILD_TAG "v104"
 // The island's pill states are 37 and 57 pt high; everything taller is a card with its own corner radius
 #define ISLAND_PILL_MAX_HEIGHT 72.0
 #define MAX_SLOTS 12
@@ -499,7 +499,10 @@ static void ccContainerUpdate(id object) {
 	}
 }
 
+static void ccSliderGlyphUpdate(UIView *slider);
+
 static void ccSliderUpdate(id object) {
+	if (!sLegacyOS) @try { ccSliderGlyphUpdate(object); } @catch (id e) {}
 	Class cls = objc_getClass("CCUIContentModuleContentContainerView");
 	if (!cls) return;
 	int level = 0;
@@ -531,6 +534,245 @@ static void ccToggleUpdate(id object) {
 		[[fill layer] setMask:nil];
 		objc_setAssociatedObject(fill, KEY("lgfix_kToggleFillMaskKey"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
+}
+
+#pragma mark - Control Center Focus module: no white circle when a Focus is on
+
+// With a Focus on, the Focus module (FCCCModuleViewController, FocusUIModule) gives its round button the
+// "alternate" background (-setUseAlternateBackground: YES): a white circle (_alternateSelectedStateBackgroundView,
+// gray 1.0) under the Focus' coloured glyph, and the light interface style. The Focus list behind the module has
+// no such circle. Leave the circle out with an empty mask (the button animates its alpha) and keep the button's
+// own material dark. Kill switch CTLDIR/keep-focus-white.
+static BOOL ccInFocusModule(UIView *view) {
+	NSNumber *cached = objc_getAssociatedObject(view, KEY("lgfix_focusButton"));
+	if (cached) return [cached boolValue];
+	if (![view window]) return NO;
+	BOOL found = NO;
+	SEL vcForView = sel_registerName("viewControllerForView:");
+	int depth = 0;
+	for (UIView *v = view; v && depth < 10 && !found; v = [v superview], depth++) {
+		id vc = nil;
+		@try { vc = ((id (*)(id, SEL, id))objc_msgSend)((id)objc_getClass("UIViewController"), vcForView, v); } @catch (id e) {}
+		if (vc && !strncmp(cname(vc), "FCCC", 4)) found = YES;
+	}
+	objc_setAssociatedObject(view, KEY("lgfix_focusButton"), [NSNumber numberWithBool:found], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	return found;
+}
+
+static void ccFocusButtonUpdate(id object) {
+	static int keep = -1;
+	if (keep < 0) keep = access(CTLDIR "/keep-focus-white", F_OK) == 0;
+	if (keep || !ccInFocusModule(object)) return;
+	UIView *circle = ivarObject(object, "_alternateSelectedStateBackgroundView");
+	UIView *material = ivarObject(object, "_normalStateBackgroundView");
+	if (![circle isKindOfClass:[UIView class]]) return;
+	BOOL want = !resolveLiquidAss() || pHostEnabled(S("ControlCenter"));
+	BOOL masked = objc_getAssociatedObject(circle, KEY("lgfix_focusCircleMask")) != nil;
+	if (want && !masked) {
+		CALayer *mask = [CALayer layer];
+		[[circle layer] setMask:mask];
+		objc_setAssociatedObject(circle, KEY("lgfix_focusCircleMask"), mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		if ([material isKindOfClass:[UIView class]]) [material setOverrideUserInterfaceStyle:UIUserInterfaceStyleDark];
+		flog("cc: Focus button's white circle left out");
+	} else if (!want && masked) {
+		[[circle layer] setMask:nil];
+		objc_setAssociatedObject(circle, KEY("lgfix_focusCircleMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		if ([material isKindOfClass:[UIView class]]) [material setOverrideUserInterfaceStyle:UIUserInterfaceStyleUnspecified];
+	}
+}
+
+#pragma mark - Control Center brightness / volume sliders: coloured glyphs
+
+// The glyph of a CC slider (sun, speaker) is punched out of the white fill: its shape layers carry the
+// compositing filter destOut, so it shows whatever lies behind the slider (dark). Here the punch-out is taken
+// off the slider's active glyph and a colour matrix paints it in one colour (alpha kept): brightness yellow,
+// volume blue, like iOS 18. The faint compensating copy for the unfilled part stays as it is.
+// Kill switch CTLDIR/keep-slider-glyphs.
+static id ccGlyphColorFilter(float r, float g, float b) {
+	Class filterClass = objc_getClass("CAFilter");
+	SEL make = sel_registerName("filterWithType:");
+	if (!filterClass || !class_getClassMethod(filterClass, make)) return nil;
+	id filter = ((id (*)(id, SEL, id))objc_msgSend)((id)filterClass, make, S("colorMatrix"));
+	// rows R, G, B, A; columns r, g, b, a, bias. Colour = alpha times the wanted colour (right for premultiplied too)
+	float m[20] = { 0, 0, 0, r, 0,   0, 0, 0, g, 0,   0, 0, 0, b, 0,   0, 0, 0, 1, 0 };
+	[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"] forKey:S("inputColorMatrix")];
+	[filter setValue:S("lgfixGlyphColor") forKey:S("name")];
+	return filter;
+}
+
+// allowsGroupBlending is private API of CALayer
+static BOOL layerGroupBlending(CALayer *layer) {
+	return ((BOOL (*)(id, SEL))objc_msgSend)(layer, sel_registerName("allowsGroupBlending"));
+}
+static void layerSetGroupBlending(CALayer *layer, BOOL on) {
+	((void (*)(id, SEL, BOOL))objc_msgSend)(layer, sel_registerName("setAllowsGroupBlending:"), on);
+}
+
+// Is `layer` built like `reference` (same classes, same number of sublayers all the way down)?
+static BOOL ccGlyphSameShape(CALayer *layer, CALayer *reference, int depth) {
+	if (!layer || !reference || depth > 12 || object_getClass(layer) != object_getClass(reference)) return NO;
+	NSArray *a = [layer sublayers], *b = [reference sublayers];
+	if ([a count] != [b count]) return NO;
+	for (NSUInteger i = 0; i < [a count]; i++)
+		if (!ccGlyphSameShape([a objectAtIndex:i], [b objectAtIndex:i], depth + 1)) return NO;
+	return YES;
+}
+
+// Takes the punch-out off: every layer gets the compositing filter and group blending of the same layer in the
+// slider's compensating copy (the same package, never set up for punch-out; checked to equal the package's own
+// state). Some glyphs cut parts of themselves with destOut on purpose (the speaker); those stay. What was there
+// before is kept on the layer for putting it back.
+static void ccGlyphPunchOut(CALayer *layer, CALayer *reference, int depth) {
+	if (!layer || depth > 12) return;
+	id want = [reference compositingFilter];
+	BOOL wantGroup = layerGroupBlending(reference);
+	id have = [layer compositingFilter];
+	BOOL haveGroup = layerGroupBlending(layer);
+	BOOL differs = haveGroup != wantGroup || (want ? ![want isEqual:have] : have != nil);
+	if (differs) {
+		if (!objc_getAssociatedObject(layer, KEY("lgfix_glyphPunch")))
+			objc_setAssociatedObject(layer, KEY("lgfix_glyphPunch"),
+			    [NSArray arrayWithObjects:have ?: [NSNull null], [NSNumber numberWithBool:haveGroup], nil], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		[layer setCompositingFilter:want];
+		if (haveGroup != wantGroup) layerSetGroupBlending(layer, wantGroup);
+	}
+	NSArray *subs = [layer sublayers], *refs = [reference sublayers];
+	for (NSUInteger i = 0; i < [subs count] && i < [refs count]; i++)
+		ccGlyphPunchOut([subs objectAtIndex:i], [refs objectAtIndex:i], depth + 1);
+}
+
+static void ccGlyphPunchRestore(CALayer *layer, int depth) {
+	if (!layer || depth > 12) return;
+	NSArray *saved = objc_getAssociatedObject(layer, KEY("lgfix_glyphPunch"));
+	if ([saved count] == 2) {
+		id filter = [saved objectAtIndex:0];
+		[layer setCompositingFilter:filter == [NSNull null] ? nil : filter];
+		layerSetGroupBlending(layer, [[saved objectAtIndex:1] boolValue]);
+		objc_setAssociatedObject(layer, KEY("lgfix_glyphPunch"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	for (CALayer *sub in [layer sublayers]) ccGlyphPunchRestore(sub, depth + 1);
+}
+
+// 1 = brightness, 2 = volume, 0 = any other slider
+static int ccSliderKind(UIView *slider) {
+	// not by class name: an observed slider is an instance of a KVO subclass (NSKVONotifying_…)
+	Class volumeClass = objc_getClass("MRUContinuousSliderView");
+	if (volumeClass && [slider isKindOfClass:volumeClass]) return 2;
+	id description = ivarObject(slider, "_glyphPackageDescription");
+	id url = [description respondsToSelector:sel_registerName("packageURL")]
+		? ((id (*)(id, SEL))objc_msgSend)(description, sel_registerName("packageURL")) : nil;
+	NSString *name = [url respondsToSelector:@selector(lastPathComponent)] ? [url lastPathComponent] : nil;
+	if ([name isKindOfClass:[NSString class]] && [name hasPrefix:S("Brightness")]) return 1;
+	return 0;
+}
+
+// Where the colour filter goes: a package view is a 0x0 layer with everything outside its bounds, so its direct
+// sublayers; an image glyph (output device symbol) has none, so its own layer
+static NSArray *ccGlyphColorLayers(UIView *glyph) {
+	NSArray *subs = [[glyph layer] sublayers];
+	return [subs count] ? subs : [NSArray arrayWithObject:[glyph layer]];
+}
+
+static void ccSliderGlyphUpdate(UIView *slider) {
+	static int keep = -1;
+	if (keep < 0) keep = access(CTLDIR "/keep-slider-glyphs", F_OK) == 0;
+	if (keep) return;
+	UIView *glyph = ivarObject(slider, "_activeGlyphView");
+	if (![glyph isKindOfClass:[UIView class]]) return;
+	int kind = ccSliderKind(slider);
+	UIView *previous = objc_getAssociatedObject(slider, KEY("lgfix_glyphColored"));
+	BOOL want = kind && (!resolveLiquidAss() || pHostEnabled(S("ControlCenter")));
+	// the slider may swap its glyph view (other package, image glyph): hand the old one back first
+	if (previous && (previous != glyph || !want)) {
+		ccGlyphPunchRestore([previous layer], 0);
+		for (CALayer *sub in ccGlyphColorLayers(previous)) [sub setFilters:nil];
+		UIView *covered = objc_getAssociatedObject(slider, KEY("lgfix_glyphCopyHidden"));
+		if (covered) {
+			if ([[covered layer] mask] == objc_getAssociatedObject(covered, KEY("lgfix_glyphCopyMask"))) [[covered layer] setMask:nil];
+			objc_setAssociatedObject(covered, KEY("lgfix_glyphCopyMask"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			objc_setAssociatedObject(slider, KEY("lgfix_glyphCopyHidden"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+		objc_setAssociatedObject(slider, KEY("lgfix_glyphColored"), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	if (!want) return;
+	// without a compensating copy of the same build there is no safe reference: the glyph stays as it is
+	UIView *reference = ivarObject(slider, "_compensatingGlyphView");
+	if (![reference isKindOfClass:[UIView class]] || !ccGlyphSameShape([glyph layer], [reference layer], 0)) {
+		if (!objc_getAssociatedObject(slider, KEY("lgfix_glyphNoRef"))) {
+			objc_setAssociatedObject(slider, KEY("lgfix_glyphNoRef"), slider, OBJC_ASSOCIATION_ASSIGN);
+			flog("cc: %s glyph left alone, its compensating copy is built differently", kind == 1 ? "brightness" : "volume");
+		}
+		return;
+	}
+	ccGlyphPunchOut([glyph layer], [reference layer], 0);
+	for (CALayer *sub in ccGlyphColorLayers(glyph)) {
+		NSArray *filters = [sub filters];
+		if ([filters count] == 1 && [[[filters firstObject] valueForKey:S("name")] isEqual:S("lgfixGlyphColor")]) continue;
+		// measured in the user's reference screenshot: sun #FFC401, speaker #40B2FF
+		id filter = kind == 1 ? ccGlyphColorFilter(1.0f, 0.77f, 0.0f) : ccGlyphColorFilter(0.25f, 0.70f, 1.0f);
+		if (filter) [sub setFilters:[NSArray arrayWithObject:filter]];
+	}
+	// The compensating copy (grey, lies over the glyph and shows it on the unfilled part) dulls the colour and
+	// is not needed while the glyph itself is always drawn: left out with an empty mask
+	if (!objc_getAssociatedObject(reference, KEY("lgfix_glyphCopyMask")) && ![[reference layer] mask]) {
+		CALayer *empty = [CALayer layer];
+		[[reference layer] setMask:empty];
+		objc_setAssociatedObject(reference, KEY("lgfix_glyphCopyMask"), empty, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(slider, KEY("lgfix_glyphCopyHidden"), reference, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	if (!previous || previous != glyph) {
+		objc_setAssociatedObject(slider, KEY("lgfix_glyphColored"), glyph, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		flog("cc: %s glyph coloured (%s)", kind == 1 ? "brightness" : "volume", cname(glyph));
+	}
+}
+
+// The volume slider gets its glyph after its layout (with the output device), and the punch-out is set up by the
+// module whenever it likes: colour again right after either. Both go through the handler table, so a newer build
+// loaded later takes over.
+static IMP sGlyphSetActiveOrig, sGlyphPunchOrig;
+
+static void ccGlyphHandler(id object) { ccSliderGlyphUpdate(object); }
+
+static void ccGlyphLater(UIView *slider) {
+	__weak UIView *weakSlider = slider;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		UIView *strong = weakSlider;
+		if (strong) callHandler("cc.glyph", strong);
+	});
+}
+
+static void ccGlyphSetActive(id self, SEL _cmd, id view) {
+	((void (*)(id, SEL, id))sGlyphSetActiveOrig)(self, _cmd, view);
+	callHandler("cc.glyph", self);
+	ccGlyphLater(self);
+}
+
+static void ccGlyphPunchConfigured(id self, SEL _cmd, BOOL on) {
+	((void (*)(id, SEL, BOOL))sGlyphPunchOrig)(self, _cmd, on);
+	Class sliderClass = objc_getClass("CCUIBaseSliderView");
+	int depth = 0;
+	for (UIView *v = [(UIView *)self superview]; sliderClass && v && depth < 5; v = [v superview], depth++)
+		if ([v isKindOfClass:sliderClass]) { ccGlyphLater(v); return; }
+}
+
+static IMP ccOwnMethodSwap(const char *className, const char *selName, IMP imp) {
+	Class cls = objc_getClass(className);
+	SEL sel = sel_registerName(selName);
+	unsigned int count = 0;
+	Method *methods = cls ? class_copyMethodList(cls, &count) : NULL;
+	IMP orig = NULL;
+	for (unsigned int m = 0; m < count; m++)
+		if (method_getName(methods[m]) == sel) orig = method_setImplementation(methods[m], imp);
+	free(methods);
+	return orig;
+}
+
+static void ccGlyphInstall(void) {
+	if (sLegacyOS || getenv("LGFIX_GLYPHHOOK")) return;   // an earlier build owns the hooks
+	sGlyphSetActiveOrig = ccOwnMethodSwap("CCUIBaseSliderView", "_setActiveGlyphView:", (IMP)ccGlyphSetActive);
+	sGlyphPunchOrig = ccOwnMethodSwap("CCUICAPackageView", "ccui_configureForPunchOutRendering:", (IMP)ccGlyphPunchConfigured);
+	if (sGlyphSetActiveOrig || sGlyphPunchOrig) setenv("LGFIX_GLYPHHOOK", BUILD_TAG, 1);
+	flog("cc: slider glyph hooks active=%d punch=%d", sGlyphSetActiveOrig != NULL, sGlyphPunchOrig != NULL);
 }
 
 #pragma mark - Now Playing module on iOS 15 and 16
@@ -1536,6 +1778,103 @@ int lgfix_cctest(const char *path) {
 	}
 }
 
+// Private test (host) with the real CC classes, without the original: 1 brightness slider glyph punch-out taken
+// off, 10 colour filter on, 100 put back when the kind is gone, 1000 Focus circle masked and material dark,
+// 10000 volume glyph keeps its own cut. Lines in <path>.
+static int testPunched(CALayer *layer) {
+	int n = [layer compositingFilter] ? 1 : 0;
+	for (CALayer *sub in [layer sublayers]) n += testPunched(sub);
+	return n;
+}
+
+int lgfix_cctest2(const char *path) {
+	@autoreleasepool {
+		FILE *f = fopen(path, "w");
+		if (!f) return -1;
+		int result = 0;
+		dlopen("/System/Library/PrivateFrameworks/ControlCenterUIKit.framework/ControlCenterUIKit", RTLD_NOW);
+		Class sliderClass = objc_getClass("CCUIContinuousSliderView"), descClass = objc_getClass("CCUICAPackageDescription");
+		NSBundle *bundle = [NSBundle bundleWithPath:S("/System/Library/ControlCenter/Bundles/DisplayModule.bundle")];
+		id desc = ((id (*)(id, SEL, id, id))objc_msgSend)((id)descClass, sel_registerName("descriptionForPackageNamed:inBundle:"), S("Brightness"), bundle);
+		UIView *slider = [[sliderClass alloc] initWithFrame:CGRectMake(0, 0, 72, 160)];
+		((void (*)(id, SEL, id))objc_msgSend)(slider, sel_registerName("setGlyphPackageDescription:"), desc);
+		[slider layoutIfNeeded];
+		UIView *glyph = ivarObject(slider, "_activeGlyphView");
+		((void (*)(id, SEL, BOOL))objc_msgSend)(glyph, sel_registerName("ccui_configureForPunchOutRendering:"), YES);
+		int punched = testPunched([glyph layer]);
+		int before = punched;
+		fprintf(f, "# kind=%d glyph=%s punched=%d\n", ccSliderKind(slider), cname(glyph), before); fflush(f);
+		ccSliderGlyphUpdate(slider);
+		punched = testPunched([glyph layer]);
+		CALayer *first = [[[glyph layer] sublayers] firstObject];
+		NSString *fname = [[[first filters] firstObject] valueForKey:S("name")];
+		fprintf(f, "# after: punched=%d filter=%s\n", punched, fname ? [fname UTF8String] : "-"); fflush(f);
+		if (before > 0 && punched == 0) result += 1;
+		if ([fname isEqual:S("lgfixGlyphColor")]) result += 10;
+		((void (*)(id, SEL, id))objc_msgSend)(slider, sel_registerName("setGlyphPackageDescription:"), nil);
+		ccSliderGlyphUpdate(slider);
+		punched = testPunched([glyph layer]);
+		fprintf(f, "# no kind: punched=%d filters=%lu\n", punched, (unsigned long)[[first filters] count]); fflush(f);
+		if (punched == before && [[first filters] count] == 0) result += 100;
+
+		// volume: the real MRU slider class with the speaker package, which cuts one part of itself on purpose
+		dlopen("/System/Library/PrivateFrameworks/MediaControls.framework/MediaControls", RTLD_NOW);
+		Class volumeClass = objc_getClass("MRUContinuousSliderView");
+		if (volumeClass) {
+			UIView *volume = [[volumeClass alloc] initWithFrame:CGRectMake(0, 0, 72, 160)];
+			id vdesc = ((id (*)(id, SEL, id, id))objc_msgSend)((id)descClass, sel_registerName("descriptionForPackageNamed:inBundle:"), S("Volume"),
+			    [NSBundle bundleWithPath:S("/System/Library/PrivateFrameworks/MediaControls.framework")]);
+			((void (*)(id, SEL, id))objc_msgSend)(volume, sel_registerName("setGlyphPackageDescription:"), vdesc);
+			[volume layoutIfNeeded];
+			UIView *vglyph = ivarObject(volume, "_activeGlyphView");
+			int own = testPunched([vglyph layer]);
+			((void (*)(id, SEL, BOOL))objc_msgSend)(vglyph, sel_registerName("ccui_configureForPunchOutRendering:"), YES);
+			int set = testPunched([vglyph layer]);
+			ccSliderGlyphUpdate(volume);
+			int after = testPunched([vglyph layer]);
+			fprintf(f, "# volume kind=%d glyph=%s own cuts=%d punched=%d after=%d (want after == own)\n", ccSliderKind(volume),
+			        cname(vglyph), own, set, after); fflush(f);
+			if (ccSliderKind(volume) == 2 && set > own && after == own) result += 10000;
+		}
+
+		// the hooks alone: a glyph set after the layout and punched out later gets coloured without a layout
+		if (volumeClass) {
+			lgfix_register("cc.glyph", ccGlyphHandler);
+			ccGlyphInstall();
+			UIView *late = [[volumeClass alloc] initWithFrame:CGRectMake(0, 0, 72, 160)];
+			[late layoutIfNeeded];
+			id vdesc = ((id (*)(id, SEL, id, id))objc_msgSend)((id)descClass, sel_registerName("descriptionForPackageNamed:inBundle:"), S("Volume"),
+			    [NSBundle bundleWithPath:S("/System/Library/PrivateFrameworks/MediaControls.framework")]);
+			((void (*)(id, SEL, id))objc_msgSend)(late, sel_registerName("setGlyphPackageDescription:"), vdesc);
+			UIView *lglyph = ivarObject(late, "_activeGlyphView");
+			int own = testPunched([lglyph layer]);
+			((void (*)(id, SEL, BOOL))objc_msgSend)(lglyph, sel_registerName("ccui_configureForPunchOutRendering:"), YES);
+			[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
+			CALayer *lfirst = [[[lglyph layer] sublayers] firstObject];
+			NSString *lname = [[[lfirst filters] firstObject] valueForKey:S("name")];
+			UIView *copy = ivarObject(late, "_compensatingGlyphView");
+			fprintf(f, "# late glyph: hooks %d %d, cuts %d (own %d), filter=%s, copy masked=%d\n", sGlyphSetActiveOrig != NULL,
+			        sGlyphPunchOrig != NULL, testPunched([lglyph layer]), own, lname ? [lname UTF8String] : "-", [[copy layer] mask] != nil);
+			if (lname && testPunched([lglyph layer]) == own && [[copy layer] mask]) result += 100000;
+		}
+
+		UIImage *image = [UIImage systemImageNamed:S("moon.fill")];
+		id vc = ((id (*)(id, SEL, id, id, BOOL))objc_msgSend)([objc_getClass("CCUILabeledRoundButtonViewController") alloc],
+		    sel_registerName("initWithGlyphImage:highlightColor:useLightStyle:"), image, [UIColor systemIndigoColor], NO);
+		UIView *button = ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("button"));
+		((void (*)(id, SEL, BOOL))objc_msgSend)(vc, sel_registerName("setUseAlternateBackground:"), YES);
+		objc_setAssociatedObject(button, KEY("lgfix_focusButton"), [NSNumber numberWithBool:YES], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		ccFocusButtonUpdate(button);
+		UIView *circle = ivarObject(button, "_alternateSelectedStateBackgroundView");
+		UIView *material = ivarObject(button, "_normalStateBackgroundView");
+		fprintf(f, "# focus circle alpha=%.1f mask=%d material style=%ld\n", [circle alpha], [[circle layer] mask] != nil,
+		        (long)[material overrideUserInterfaceStyle]); fflush(f);
+		if ([[circle layer] mask] && [material overrideUserInterfaceStyle] == UIUserInterfaceStyleDark) result += 1000;
+		fclose(f);
+		return result;
+	}
+}
+
 #pragma mark - dev loader and constructor
 
 // Timers and notifications of a build that was taken over stay registered; only the newest one acts
@@ -1562,6 +1901,8 @@ static void registerHandlers(void (*reg)(const char *, LGFixHandler)) {
 	reg("cc.container", ccContainerUpdate);
 	reg("cc.slider", ccSliderUpdate);
 	reg("cc.toggle", ccToggleUpdate);
+	reg("cc.focus", ccFocusButtonUpdate);
+	reg("cc.glyph", ccGlyphHandler);
 	reg("cc.mediastyle", ccMediaStyleUpdate);
 	reg("island", islandUpdate);
 	reg("island.element", islandElementUpdate);
@@ -1573,6 +1914,7 @@ static void installHooks(int (*hook)(const char *, const char *), const char *wh
 	flog("%s: island=%d element=%d", why, hook("SBSystemApertureContainerView", "island"),
 	     hook("SAUIElementView", "island.element"));
 	islandConfigInstall();
+	ccGlyphInstall();
 	flog("%s: widgetFill=%d list=%d", why, hook("CHUISWidgetHostViewControllerView", "widget.fill"),
 	     hook("SBIconListView", "widget.list"));
 	@try {
@@ -1586,8 +1928,8 @@ static void installHooks(int (*hook)(const char *, const char *), const char *wh
 	     hook("CCUIContentModuleContentContainerView", "cc.container"),
 	     hook("CCUIContinuousSliderView", "cc.slider"),
 	     resolveLiquidAss());
-	flog("%s: toggle=%d mediastyle=%d", why, hook("CCUIButtonModuleView", "cc.toggle"),
-	     hook("MRUControlCenterView", "cc.mediastyle"));
+	flog("%s: toggle=%d mediastyle=%d focus=%d", why, hook("CCUIButtonModuleView", "cc.toggle"),
+	     hook("MRUControlCenterView", "cc.mediastyle"), sLegacyOS ? 0 : hook("CCUIRoundButton", "cc.focus"));
 	@try {
 		Class mediaClass = objc_getClass("MRUControlCenterView");
 		NSArray *windows = ((id (*)(id, SEL, BOOL, BOOL))objc_msgSend)((id)objc_getClass("UIWindow"),
