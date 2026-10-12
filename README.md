@@ -90,6 +90,8 @@ New in the rootful iOS 13 port `1:0.1.1-2b+ios13.19`: the **coloured Control Cen
 
 New in test38 (rootless) and in the rootful iOS 13 port `1:0.1.1-2b+ios13.20`: after a release the **whole floating tab bar swings back** from its pressed size (the original enlarges it by 3.5 % while a tab is held and let it glide back; now it runs a little below its size and comes back). Switch off by file: `no-tabbar-release-bounce` in `/var/jb/usr/lib/LiquidAssFix/` (rootless) or `/usr/lib/LiquidAssFix/` (rootful). The rootful build was again published without having been run on a device.
 
+New in test41 (rootless only): the tab bar's selection drop **keeps its size while it slides** under the finger and only swings when its size really changes (it used to wobble for as long as it moved); held or dragged slowly it is taller (94 x 92 pt), at full speed flatter (about 132 x 46 pt). As before with the file `/var/jb/usr/lib/LiquidAssFix/tabbar-drop-live-size`. The rootful iOS 13 port stays at `1:0.1.1-2b+ios13.20` with the motion of test38.
+
 ---
 
 # Original README

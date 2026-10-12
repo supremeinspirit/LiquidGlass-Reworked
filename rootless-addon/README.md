@@ -57,6 +57,7 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `no-tabbar-lean` | the drop stays on the bar's middle line instead of leaning towards the finger |
 | `no-tabbar-reach` | past the first and last tab the drop only goes as far as the original lets it |
 | `tabbar-drop-old-size` | the drop's sizes as before test37: the original's lifted size, less change with speed (takes effect when an app is next started) |
+| `tabbar-drop-live-size` | the drop's size follows every change of its speed at once, as before test41, instead of keeping still during a steady slide (takes effect when an app is next started) |
 | `no-tabbar-settle-bounce` | after a release the resting pill behind the selected tab takes its size without swinging (takes effect when an app is next started) |
 | `no-tabbar-release-bounce` | after a release the whole bar glides back from its pressed size as the original lets it, without swinging (takes effect when an app is next started) |
 | `tabbar-120hz` | trial, off unless the file exists: lets an app's own animations run at the screen's full refresh rate (sets `CADisableMinimumFrameDurationOnPhone` for the whole app; untested) |

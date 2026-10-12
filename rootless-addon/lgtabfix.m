@@ -76,7 +76,7 @@
 #include <ptrauth.h>
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
-#define BUILD_TAG "t35"
+#define BUILD_TAG "t38"
 #define MAX_BUTTONS 16
 #define MAX_TRIES 3
 
@@ -212,6 +212,11 @@ static void install(void) {
 // by 3.5 % while a tab is held and lets it glide back in 0.26 s; now it runs a little below its size and comes
 // back. Without that only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-release-bounce
 // The drop's sizes as before t31: /var/jb/usr/lib/LiquidAssFix/tabbar-drop-old-size
+//
+// Since t36 the drop keeps its size while it slides under the finger: the size goes by the speed evened out over
+// about a twentieth of a second and only follows once that speed has really changed, and its spring swings less, so
+// it swings when the size changes and stands still otherwise. As before (the size follows every change of the
+// speed at once): /var/jb/usr/lib/LiquidAssFix/tabbar-drop-live-size
 // Without the size change from the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-pull
 // Without the lean towards the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-lean
 // Without the longer way past the first and last tab only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-reach
@@ -231,6 +236,7 @@ typedef struct {
 	int settling;                     // the drop was on its way into the resting pill at the last tick
 	int frames;
 	double framesFrom;
+	double pace, paceHeld;            // the speed the size goes by under the finger: evened out, and as last taken
 } TabMotion;
 
 static IMP origMotionTick, origMotionStart;
@@ -292,13 +298,29 @@ static TabMotion *motionFor(id state) {
 // pictures: fast about 132x53. The pressed size was set again in t32 from a screenshot of this drop beside the
 // reference, both measured against their bar's height: the reference drop is 1.44 bar heights wide and 1.28
 // high, ours was 1.33 and 1.18 (88x78), so it is now 94x85.
+// Since t38 the held and slowly dragged drop is taller only (94x92, was 94x85), and the fast one flatter (about
+// 132x46, was 132x53).
 #define MOTION_PRESS_W 0.0
-#define MOTION_PRESS_H 13.0
+#define MOTION_PRESS_H 20.0
 #define MOTION_FAST_W 38.0
-#define MOTION_FAST_H 32.0
+#define MOTION_FAST_H 46.0
 #define MOTION_SLOW_SPEED 45.0      // pt per second up to which the drop keeps its pressed size
 #define MOTION_FULL_SPEED 800.0
-static int motionOldSize = -1;
+#define MOTION_PACE_TIME 0.05       // seconds over which the speed is evened out before the size goes by it
+#define MOTION_PACE_HOLD 0.18       // part of the speed range the evened speed may wander without a new size
+#define MOTION_STEADY_DAMPING 0.50  // the size spring under the finger (0.40 before t36)
+static int motionOldSize = -1, motionLiveSize = -1;
+
+// The speed (0 to 1) the drop's size goes by while it slides under the finger: evened out, and held until it has
+// moved away from the last one taken by more than the hold, which gets smaller towards standing still and full
+// speed so that both ends are still reached.
+static double motionPace(TabMotion *m, double speed, double dt) {
+	m->pace += (speed - m->pace) * (1.0 - exp(-dt / MOTION_PACE_TIME));
+	double hold = MOTION_PACE_HOLD * fmin(fmin(m->pace, 1.0 - m->pace) / 0.25, 1.0);
+	if (hold < 0.0) hold = 0.0;
+	m->paceHeld = fmin(fmax(m->paceHeld, m->pace - hold), m->pace + hold);
+	return m->paceHeld;
+}
 
 static double motionRestY;         // the drop's centre height in the bar, as the original last placed it
 
@@ -422,6 +444,7 @@ static BOOL motionPrepare(id state, id link) {
 		m->x = renderedX; m->w = renderedW; m->h = renderedH;
 		m->vx = m->vw = m->vh = 0.0;
 		if (fresh) m->shift = m->vshift = 0.0;
+		if (fresh) m->pace = m->paceHeld = 0.0;
 		if (fresh && !settling && targetW >= 40.0 && targetW <= 220.0 && targetH >= 30.0 && targetH <= 140.0) {
 			m->baseW = targetW;
 			m->baseH = targetH;
@@ -458,6 +481,12 @@ static BOOL motionPrepare(id state, id link) {
 		} else {
 			double speed = fmin(fmax((fabs(m->vx) - MOTION_SLOW_SPEED) / (MOTION_FULL_SPEED - MOTION_SLOW_SPEED), 0.0), 1.0);
 			speed = pow(speed, 0.85);
+			if (motionLiveSize < 0) motionLiveSize = access(CTLDIR "/tabbar-drop-live-size", F_OK) == 0;
+			// under the finger the size keeps still while the speed only wavers; a flying drop goes by its speed
+			// as it is (the original waits for its exact size at the end)
+			BOOL steady = !motionLiveSize && !flying && dragged;
+			if (steady) speed = motionPace(m, speed, dt);
+			else m->pace = m->paceHeld = speed;
 			// on its way to a tapped tab the drop ends in the original's own lifted size: the original waits for
 			// exactly that size before it lets the drop settle on the tab
 			double press = flying ? fmin(fabs(targetX - m->x) / 40.0, 1.0) : 1.0;
@@ -466,7 +495,7 @@ static BOOL motionPrepare(id state, id link) {
 			if (flying || !dragged) { responseX = 0.28; dampingX = 0.72; }      // on its way to a tapped tab
 			else                    { responseX = 0.15; dampingX = 0.78; }      // under the finger
 			responseSize = 0.28;
-			dampingSize = 0.40;
+			dampingSize = steady ? MOTION_STEADY_DAMPING : 0.40;
 		}
 	}
 	double goalX = !settling && !flying && active && dragged ? motionReach(bar, targetX) : targetX;
@@ -2310,7 +2339,11 @@ static void fakeTick(id self, SEL _cmd, id link) {
 // past the last tab pulls the drop 34 pt past it, 1024 on a release the shape gets 3 to 13 pt flatter than the
 // resting pill, and the pill then carries an additive swing that starts at the drop's last size and ends at 0,
 // 2048 the bar's swing after a release starts at its pressed size, goes below its own size and ends on it, is
-// taken off again by a new touch, and a bar that was not enlarged gets none.
+// taken off again by a new touch, and a bar that was not enlarged gets none, 4096 in a drag with a wavering speed
+// the drop's height moves by less than 2.5 pt and by less than 0.4 of what it does with the size following the
+// speed at once, and it is back at the pressed size after the stop.
+#define PRESSED_W (94.0 + MOTION_PRESS_W)
+#define PRESSED_H (72.0 + MOTION_PRESS_H)
 int lgtabfix_motiontest(const char *arg) {
 	(void)arg;
 	@autoreleasepool {
@@ -2369,7 +2402,7 @@ int lgtabfix_motiontest(const char *arg) {
 		double top = 0.0;
 		for (int i = 0; i < 24; i++) { STEP(1.0 / 60.0); top = fmax(top, f->h); }
 		fprintf(stderr, "motion test: lift-off top %.2f, now %.2fx%.2f\n", top, f->w, f->h);
-		if (top > 85.5 && top < 99.0 && fabs(f->h - 85.0) < 1.5 && fabs(f->w - 94.0) < 1.5) result += 4;
+		if (top > PRESSED_H + 0.5 && top < PRESSED_H + 14.0 && fabs(f->h - PRESSED_H) < 1.5 && fabs(f->w - PRESSED_W) < 1.5) result += 4;
 
 		// a fast drag to the right, drawn at 120 per second
 		f->dragged = YES;
@@ -2380,19 +2413,19 @@ int lgtabfix_motiontest(const char *arg) {
 			flattest = fmin(flattest, f->h); widest = fmax(widest, f->w);
 		}
 		fprintf(stderr, "motion test: drag flattest %.2f widest %.2f at x %.2f\n", flattest, widest, f->x);
-		if (flattest < 58.0 && flattest > 46.0 && widest > 120.0 && widest < 142.0) result += 8;
+		if (flattest < 52.0 && flattest > 40.0 && widest > 120.0 && widest < 142.0) result += 8;
 
 		// the finger rests
 		top = 0.0;
 		for (int i = 0; i < 48; i++) { STEP(1.0 / 60.0); top = fmax(top, f->h); }
 		fprintf(stderr, "motion test: after the stop top %.2f, rest %.2f,%.2fx%.2f\n", top, f->x, f->w, f->h);
-		if (top > 85.3 && fabs(f->h - 85.0) < 0.6 && fabs(f->w - 94.0) < 0.6 && fabs(f->x - 300.0) < 0.5) result += 16;
+		if (top > PRESSED_H + 0.3 && fabs(f->h - PRESSED_H) < 0.6 && fabs(f->w - PRESSED_W) < 0.6 && fabs(f->x - 300.0) < 0.5) result += 16;
 
 		// the finger moves far above the bar
 		motionTouchBar = bar; motionTouchY = [lens center].y - 150.0; motionTouchX = 300.0; motionTouching = YES;
 		for (int i = 0; i < 40; i++) STEP(1.0 / 60.0);
 		fprintf(stderr, "motion test: pulled %.2fx%.2f\n", f->w, f->h);
-		if (f->h > 91.0 && f->h < 103.0 && f->w < 94.0) result += 32;
+		if (f->h > PRESSED_H + 6.0 && f->h < PRESSED_H + 18.0 && f->w < PRESSED_W) result += 32;
 		double leaned = [lens center].y;
 		fprintf(stderr, "motion test: leaned to y %.2f (bar middle 30)\n", leaned);
 		motionTouching = NO;
@@ -2465,6 +2498,30 @@ int lgtabfix_motiontest(const char *arg) {
 			if ([[bar layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceX"]]) result -= 2048;
 			motionBarBounce(bar, 1.001);
 			if ([[bar layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceX"]]) result -= 2048;
+		}
+		// a drag whose speed wavers (420 pt/s, 130 up and down, six times a second): the drop's height keeps nearly
+		// still, far stiller than with the size following the speed at once, and the stop brings the pressed size back
+		{
+			double range[2] = { 0.0, 0.0 };
+			for (int live = 1; live >= 0; live--) {
+				motionLiveSize = live;
+				f->finished = NO; f->generation += 1; f->active = YES; f->dragged = YES; f->flying = NO; f->settling = NO;
+				f->lastDisplayTime = 0.0; f->widthVelocity = f->heightVelocity = 0.0;
+				f->x = 100; f->w = PRESSED_W; f->h = PRESSED_H; f->targetX = 100; f->targetW = 94; f->targetH = 72;
+				double low = 1000.0, high = 0.0;
+				for (int i = 0; i < 84; i++) {
+					double t = i / 60.0;
+					f->targetX += (420.0 + 130.0 * sin(2.0 * M_PI * 6.0 * t)) / 60.0;
+					STEP(1.0 / 60.0);
+					if (i >= 30) { low = fmin(low, f->h); high = fmax(high, f->h); }
+				}
+				range[live] = high - low;
+				fprintf(stderr, "motion test: wavering drag (%s) height from %.2f to %.2f\n", live ? "size live" : "size held", low, high);
+			}
+			for (int i = 0; i < 60; i++) STEP(1.0 / 60.0);
+			fprintf(stderr, "motion test: after the wavering drag rest %.2fx%.2f\n", f->w, f->h);
+			if (range[0] < 2.5 && range[0] < 0.4 * range[1] && fabs(f->h - PRESSED_H) < 0.6 && fabs(f->w - PRESSED_W) < 0.6) result += 4096;
+			motionLiveSize = -1;
 		}
 		if (exact) result += 2;
 		return result;
