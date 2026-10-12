@@ -76,7 +76,7 @@
 #include <ptrauth.h>
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
-#define BUILD_TAG "t29"
+#define BUILD_TAG "t30"
 #define MAX_BUTTONS 16
 #define MAX_TRIES 3
 
@@ -134,9 +134,12 @@ static BOOL buttonsOverlap(UIView *bar) {
 	return NO;
 }
 
+static void tabSpecularSeen(UIView *bar);
+
 static void tabBarLayout(UIView *self, SEL _cmd) {
 	((void (*)(id, SEL))origLayout)(self, _cmd);
 	if (![self window]) return;
+	@try { tabSpecularSeen(self); } @catch (id e) {}
 	const void *triesKey = KEY("lgtabfix_tries");
 	if (!buttonsOverlap(self)) {
 		if (objc_getAssociatedObject(self, triesKey)) objc_setAssociatedObject(self, triesKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1330,6 +1333,51 @@ static double fieldMotionAngle = -M_PI_4, fieldMotionApplied = -100.0;
 static int fieldMotionIdle, fieldMotionTicks;
 static BOOL fieldMotionLogged, fieldMotionObserving;
 
+// The same for the glass of the original's floating tab bar: its light edge stood still in every app as well.
+// A bar that carries the glass is noted at its layout and its edge is turned together with the text bars',
+// by the same timer and under the same conditions (setting on, bar on screen, app in front).
+// Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-tabbar-specular-motion
+static NSHashTable *tabGlassBars;               // weak: tab bars that carry the original's glass
+static BOOL tabMotionOn, tabMotionLogged;
+static int tabMotionForce;                      // self-test: 1 = on, -1 = off
+static CFAbsoluteTime tabMotionAskedAt;
+
+static void tabMotionRead(void) {
+	if (tabMotionForce) { tabMotionOn = tabMotionForce > 0; return; }
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (tabMotionAskedAt != 0.0 && now - tabMotionAskedAt < 2.0) return;
+	tabMotionAskedAt = now;
+	BOOL on = NO;
+	if (access(CTLDIR "/no-tabbar-specular-motion", F_OK) != 0 && access(CTLDIR "/disabled", F_OK) != 0) {
+		NSDictionary *file = [NSDictionary dictionaryWithContentsOfFile:[NSString stringWithUTF8String:PREFS_FILE]];
+		if ([file isKindOfClass:[NSDictionary class]]) {
+			id motionValue = [file objectForKey:[NSString stringWithUTF8String:"Specular.Motion.Enabled"]];
+			id sensitivityValue = [file objectForKey:[NSString stringWithUTF8String:"Specular.Motion.Sensitivity"]];
+			on = [motionValue respondsToSelector:@selector(boolValue)] && [motionValue boolValue];
+			double sensitivity = [sensitivityValue respondsToSelector:@selector(doubleValue)] ? [sensitivityValue doubleValue] : 2.0;
+			if (on) fieldMotionSensitivity = isfinite(sensitivity) ? fmin(8.0, fmax(0.0, sensitivity)) : 2.0;
+		}
+	}
+	tabMotionOn = on;
+}
+
+// YES when a noted bar shows its glass; apply: the glasses' light edge is turned to angle as well
+static BOOL tabGlasses(double angle, BOOL apply) {
+	Class glassClass = objc_getClass("LGLiveBackdropView");
+	if (!glassClass || !tabGlassBars) return NO;
+	SEL sel = sel_registerName("applySpecularAngle:");
+	BOOL visible = NO;
+	for (UIView *bar in [tabGlassBars allObjects]) {
+		if (![bar window] || [bar isHidden]) continue;
+		for (UIView *view in [bar subviews]) {
+			if (![view isKindOfClass:glassClass] || [view isHidden]) continue;
+			visible = YES;
+			if (apply && [view respondsToSelector:sel]) ((void (*)(id, SEL, CGFloat))objc_msgSend)(view, sel, angle);
+		}
+	}
+	return visible;
+}
+
 static void fieldMotionStop(void) {
 	if (fieldMotionTimer) { dispatch_source_cancel(fieldMotionTimer); fieldMotionTimer = NULL; }
 	@try {
@@ -1346,6 +1394,8 @@ static void fieldMotionApply(double angle) {
 		if (glass && [glass window] && ![glass isHidden] && [glass respondsToSelector:sel])
 			((void (*)(id, SEL, CGFloat))objc_msgSend)(glass, sel, angle);
 	}
+	// a bar noted earlier goes back to the resting edge when its part was switched off
+	tabGlasses(tabMotionOn ? angle : -M_PI_4, YES);
 	[CATransaction commit];
 }
 
@@ -1356,10 +1406,13 @@ static void fieldMotionTick(void *unused) {
 			UIView *glass = objc_getAssociatedObject(owner, KEY("lgfix_fieldGlass"));
 			if (glass && [glass window] && ![glass isHidden]) { visible = YES; break; }
 		}
+		if (!fieldMotionOn) visible = NO;
+		if (!visible && tabMotionOn) visible = tabGlasses(0.0, NO);
+		BOOL on = fieldMotionOn || tabMotionOn;
 		BOOL front = [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive;
-		if (!fieldMotionOn || !front || !visible) {
-			if (!fieldMotionOn || !front || ++fieldMotionIdle > 60) {
-				if (!fieldMotionOn) { fieldMotionAngle = -M_PI_4; fieldMotionApply(fieldMotionAngle); fieldMotionApplied = -100.0; }
+		if (!on || !front || !visible) {
+			if (!on || !front || ++fieldMotionIdle > 60) {
+				if (!on) { fieldMotionAngle = -M_PI_4; fieldMotionApply(fieldMotionAngle); fieldMotionApplied = -100.0; }
 				fieldMotionStop();
 			}
 			return;
@@ -1384,17 +1437,42 @@ static void fieldMotionTick(void *unused) {
 				fieldMotionLogged = YES;
 				tlog("search field: light edge follows the tilt (logged once)");
 			}
+			if (!tabMotionLogged && tabMotionOn && tabGlasses(0.0, NO)) {
+				tabMotionLogged = YES;
+				tlog("tab bar: light edge follows the tilt (logged once)");
+			}
 		}
 	} @catch (id e) {}
 }
 
 static void fieldMotionEnsure(void);
 static void fieldMotionAppActive(CFNotificationCenterRef center, void *observer, CFNotificationName name, const void *object, CFDictionaryRef info) {
+	// the setting may have been changed while the app was in the back
+	if ([tabGlassBars count]) {
+		tabMotionAskedAt = 0.0;
+		tabMotionRead();
+		if (!tabMotionOn && !fieldMotionTimer) {
+			[CATransaction begin];
+			[CATransaction setDisableActions:YES];
+			tabGlasses(-M_PI_4, YES);
+			[CATransaction commit];
+		}
+	}
 	fieldMotionEnsure();
 }
 
+static void fieldMotionObserve(void) {
+	if (fieldMotionObserving) return;
+	fieldMotionObserving = YES;
+	CFNotificationCenterAddObserver(CFNotificationCenterGetLocalCenter(), NULL, fieldMotionAppActive,
+	                                (__bridge CFStringRef)UIApplicationDidBecomeActiveNotification, NULL,
+	                                CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
 static void fieldMotionEnsure(void) {
-	if (fieldMotionTimer || !fieldMotionOn || fieldTestCreate || access(CTLDIR "/no-searchfield-motion", F_OK) == 0) return;
+	if (fieldMotionTimer || fieldTestCreate) return;
+	if (access(CTLDIR "/no-searchfield-motion", F_OK) == 0) fieldMotionOn = NO;
+	if (!fieldMotionOn && !tabMotionOn) return;
 	@try {
 		if (![UIApplication sharedApplication]) return;
 		if (!fieldMotionManager) {
@@ -1404,12 +1482,7 @@ static void fieldMotionEnsure(void) {
 			fieldMotionManager = [[cls alloc] init];
 		}
 		if (!fieldMotionManager || ![fieldMotionManager respondsToSelector:sel_registerName("startDeviceMotionUpdatesUsingReferenceFrame:")]) return;
-		if (!fieldMotionObserving) {
-			fieldMotionObserving = YES;
-			CFNotificationCenterAddObserver(CFNotificationCenterGetLocalCenter(), NULL, fieldMotionAppActive,
-			                                (__bridge CFStringRef)UIApplicationDidBecomeActiveNotification, NULL,
-			                                CFNotificationSuspensionBehaviorDeliverImmediately);
-		}
+		fieldMotionObserve();
 		((void (*)(id, SEL, double))objc_msgSend)(fieldMotionManager, sel_registerName("setDeviceMotionUpdateInterval:"), 1.0 / 30.0);
 		// 1 = CMAttitudeReferenceFrameXArbitraryZVertical, the original's
 		((void (*)(id, SEL, NSUInteger))objc_msgSend)(fieldMotionManager, sel_registerName("startDeviceMotionUpdatesUsingReferenceFrame:"), 1);
@@ -1419,6 +1492,25 @@ static void fieldMotionEnsure(void) {
 		dispatch_source_set_event_handler_f(fieldMotionTimer, fieldMotionTick);
 		dispatch_resume(fieldMotionTimer);
 	} @catch (id e) {}
+}
+
+// called at every layout of a tab bar that is in a window
+static void tabSpecularSeen(UIView *bar) {
+	Class glassClass = objc_getClass("LGLiveBackdropView");
+	if (!glassClass) return;
+	BOOL glass = NO;
+	for (UIView *view in [bar subviews])
+		if ([view isKindOfClass:glassClass]) { glass = YES; break; }
+	if (!glass) return;
+	tabMotionRead();
+	if (!tabMotionOn && ![tabGlassBars containsObject:bar]) return;
+	if (!tabGlassBars) tabGlassBars = [NSHashTable weakObjectsHashTable];
+	[tabGlassBars addObject:bar];
+	if (!tabMotionOn) return;
+	// a glass puts its edge back to the resting angle when it is laid out: the next tick sets it again
+	fieldMotionTicks = 15;
+	if ([UIApplication sharedApplication]) fieldMotionObserve();
+	fieldMotionEnsure();
 }
 
 static void fieldsRefresh(void *unused) {
@@ -2137,6 +2229,51 @@ int lgtabfix_motiontest(const char *arg) {
 		fprintf(stderr, "motion test: tap finished after %d ticks at %.2f,%.2fx%.2f\n", ticks, f->x, f->w, f->h);
 		if (f->finished && ticks <= 72 && fabs(f->x - 120.0) < 1.0) result += 128;
 		if (exact) result += 2;
+		return result;
+	}
+}
+
+static double tabTestAngle = -100.0;
+static void tabTestApply(id self, SEL _cmd, CGFloat angle) { tabTestAngle = angle; }
+
+// Private self-test (host) of the tab bar's moving light edge, a plain view class standing in for the glass:
+// 1 a bar without glass is not noted, 2 a bar with glass is noted at its layout, 4 the angle reaches its glass,
+// 8 a hidden glass is left alone, 16 with the part switched off the glass gets the resting angle.
+int lgtabfix_tabspeculartest(const char *arg) {
+	(void)arg;
+	@autoreleasepool {
+		int result = 0;
+		Class glassClass = objc_getClass("LGLiveBackdropView");
+		if (!glassClass) {
+			glassClass = objc_allocateClassPair([UIView class], "LGLiveBackdropView", 0);
+			class_addMethod(glassClass, sel_registerName("applySpecularAngle:"), (IMP)tabTestApply, "v24@0:8d16");
+			objc_registerClassPair(glassClass);
+		}
+		install();
+		tabMotionForce = 1;
+		UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 430, 932)];
+		UITabBar *plain = [[UITabBar alloc] initWithFrame:CGRectMake(0, 800, 430, 83)];
+		[window addSubview:plain];
+		[plain setNeedsLayout]; [plain layoutIfNeeded];
+		if (hookInstalled && ![tabGlassBars count]) result += 1;
+		UITabBar *bar = [[UITabBar alloc] initWithFrame:CGRectMake(0, 700, 430, 83)];
+		UIView *glass = [[glassClass alloc] initWithFrame:CGRectMake(20, 10, 390, 60)];
+		[bar insertSubview:glass atIndex:0];
+		[window addSubview:bar];
+		[bar setNeedsLayout]; [bar layoutIfNeeded];
+		if ([tabGlassBars count] == 1 && [tabGlassBars containsObject:bar]) result += 2;
+		fieldMotionApply(0.5);
+		if (fabs(tabTestAngle - 0.5) < 1e-9) result += 4;
+		[glass setHidden:YES];
+		fieldMotionApply(0.9);
+		if (fabs(tabTestAngle - 0.5) < 1e-9 && !tabGlasses(0.0, NO)) result += 8;
+		[glass setHidden:NO];
+		tabMotionForce = -1;
+		[bar setNeedsLayout]; [bar layoutIfNeeded];
+		fieldMotionApply(0.9);
+		if (fabs(tabTestAngle + M_PI_4) < 1e-9) result += 16;
+		fprintf(stderr, "tab specular test: bars %lu, last angle %.3f, timer %d\n", (unsigned long)[tabGlassBars count], tabTestAngle, fieldMotionTimer != NULL);
+		tabMotionForce = 0;
 		return result;
 	}
 }

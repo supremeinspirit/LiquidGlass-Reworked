@@ -82,6 +82,8 @@ New in test29 (rootless, iOS 17): Control Center sliders. While a slider module 
 
 New in test32 (rootless): **text bars** (search fields, Safari's address bar) are drawn with the glass and the full pill shape of the Spotlight Search Bar instead of the Search Pill glass, and their light edge follows the phone's tilt when Specular Motion is on (the original only does that inside SpringBoard). The **selection drop of the floating tab bar** moves as a spring instead of a fixed fraction per frame: it gets flatter and wider with its speed, swings past its size when it lifts off and when it stops, leans towards the finger's height and follows the finger further past the first and last tab.
 
+New in test33 (rootless): the **light edge of the floating tab bar** follows the phone's tilt in apps as well when Specular Motion is on, by the same timer as the text bars (switch off by file: `/var/jb/usr/lib/LiquidAssFix/no-tabbar-specular-motion`).
+
 ---
 
 # Original README

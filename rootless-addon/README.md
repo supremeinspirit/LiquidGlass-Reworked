@@ -51,6 +51,7 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `no-searchfield-glass` | no glass on search fields and Safari's address bar (takes effect when an app is next started) |
 | `searchfield-old-style` | text bars as before test32: Search Pill glass, the field's own corner radius, blur 5 (takes effect when an app is next started) |
 | `no-searchfield-motion` | the light edge of the text bars does not follow the tilt |
+| `no-tabbar-specular-motion` | the light edge of the floating tab bar does not follow the tilt in apps (takes effect when an app is next started) |
 | `no-tabbar-motion` | the tab bar's selection drop moves as the original moves it (takes effect when an app is next started) |
 | `no-tabbar-pull` | the drop does not get taller when the finger leaves the bar upwards or downwards |
 | `no-tabbar-lean` | the drop stays on the bar's middle line instead of leaning towards the finger |
