@@ -1,5 +1,5 @@
 // Tab bar selection motion for the rootful build: the same code as the rootless add-on's (rootless-addon/lgtabfix.m,
-// section "tab bar selection motion", state of Reworked v3 test37), compiled into the tweak itself. It changes the
+// section "tab bar selection motion", state of Reworked v3 test38), compiled into the tweak itself. It changes the
 // drop that Hooks/TabBar.x draws (LGTabBarMotionState) at run time, exactly as the add-on does to the original.
 // Kept as its own file so that both builds share one text; change it there first and copy the section over.
 // The switch files below are looked for in /usr/lib/LiquidAssFix on a rootful phone.
@@ -67,6 +67,10 @@ static void tlog(const char *fmt, ...) {
 //
 // Kill switch: create /usr/lib/LiquidAssFix/no-tabbar-motion (the original's motion)
 // Without the swing of the resting pill after a release only: /usr/lib/LiquidAssFix/no-tabbar-settle-bounce
+//
+// Since t35 the whole bar swings as well when it goes back from its pressed size: the original enlarges the bar
+// by 3.5 % while a tab is held and lets it glide back in 0.26 s; now it runs a little below its size and comes
+// back. Without that only: /usr/lib/LiquidAssFix/no-tabbar-release-bounce
 // The drop's sizes as before t31: /usr/lib/LiquidAssFix/tabbar-drop-old-size
 // Without the size change from the finger's height only: /usr/lib/LiquidAssFix/no-tabbar-pull
 // Without the lean towards the finger's height only: /usr/lib/LiquidAssFix/no-tabbar-lean
@@ -482,9 +486,77 @@ static void motionNoteTouch(UIView *button, UITouch *touch, BOOL down) {
 	} @catch (id e) { motionTouching = NO; }
 }
 
+// How large the original draws the bar right now (1 at rest, up to 1.035 while a tab is held): read from the
+// bar's glass as it stands on screen
+static double motionBarScale(UIView *bar) {
+	Class glassClass = objc_getClass("LGLiveBackdropView");
+	if (!glassClass || !bar) return 1.0;
+	double barWidth = [bar bounds].size.width;
+	for (UIView *view in [bar subviews]) {
+		if (![view isKindOfClass:glassClass] || [view isHidden] || [view bounds].size.width < barWidth * 0.5) continue;
+		CALayer *shown = [[view layer] presentationLayer] ?: [view layer];
+		double scale = [shown transform].m11;
+		return isfinite(scale) ? scale : 1.0;
+	}
+	return 1.0;
+}
+
+// UIKit's ease-out curve (control points 0,0 / 0.58,1): the part of the way done after the part `u` of the time
+static double motionEaseOut(double u) {
+	if (u <= 0.0) return 0.0;
+	if (u >= 1.0) return 1.0;
+	double low = 0.0, high = 1.0, t = u;
+	for (int i = 0; i < 40; i++) {
+		t = (low + high) * 0.5;
+		double x = 3.0 * (1.0 - t) * t * t * 0.58 + t * t * t;
+		if (x < u) low = t; else high = t;
+	}
+	return 3.0 * (1.0 - t) * t * t + t * t * t;
+}
+
+// The bar on its way back from the size `scale` to 1: the original lets it glide there in 0.26 s. Laid on top of
+// that (Core Animation adds it to what the original animates, nothing of the original's is changed) is the
+// difference to a spring that starts at the same size, runs below 1 and comes back.
+#define MOTION_BAR_RESPONSE 0.38
+#define MOTION_BAR_DAMPING 0.35
+static int motionNoBarBounce = -1;
+static BOOL motionBarLogged;
+static void motionBarBounce(UIView *bar, double scale) {
+	if (motionNoBarBounce < 0) motionNoBarBounce = access(CTLDIR "/no-tabbar-release-bounce", F_OK) == 0;
+	double extra = scale - 1.0;
+	if (motionNoBarBounce || !bar || !isfinite(extra) || extra < 0.004 || extra > 0.2) return;
+	const int count = 60;
+	NSMutableArray *values = [NSMutableArray arrayWithCapacity:count + 1];
+	double spring = 1.0, speed = 0.0;
+	for (int i = 0; i <= count; i++) {
+		double glide = 1.0 - motionEaseOut((i / 60.0) / 0.26);
+		[values addObject:[NSNumber numberWithDouble:i == count ? 0.0 : extra * (spring - glide)]];
+		motionSpring(&spring, &speed, 0.0, MOTION_BAR_RESPONSE, MOTION_BAR_DAMPING, 1.0 / 60.0);
+	}
+	static const char *paths[] = { "transform.scale.x", "transform.scale.y" };
+	static const char *keys[] = { "lgtabfixBarBounceX", "lgtabfixBarBounceY" };
+	for (int i = 0; i < 2; i++) {
+		CAKeyframeAnimation *animation = [CAKeyframeAnimation animationWithKeyPath:[NSString stringWithUTF8String:paths[i]]];
+		[animation setValues:values];
+		[animation setDuration:count / 60.0];
+		[animation setAdditive:YES];
+		[[bar layer] addAnimation:animation forKey:[NSString stringWithUTF8String:keys[i]]];
+	}
+	if (!motionBarLogged) {
+		motionBarLogged = YES;
+		tlog("tab bar: the bar swings back from %.3f times its size after the release (logged once)", scale);
+	}
+}
+static void motionBarBounceStop(UIView *bar) {
+	if (!bar) return;
+	[[bar layer] removeAnimationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceX"]];
+	[[bar layer] removeAnimationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceY"]];
+}
+
 static BOOL buttonBegin(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
 	installMotion();
 	motionNoteTouch(self, touch, YES);
+	@try { motionBarBounceStop(motionBarOf(self)); } @catch (id e) {}
 	return ((BOOL (*)(id, SEL, id, id))origButtonBegin)(self, _cmd, touch, event);
 }
 static BOOL buttonContinue(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
@@ -493,11 +565,19 @@ static BOOL buttonContinue(UIView *self, SEL _cmd, UITouch *touch, UIEvent *even
 }
 static void buttonEnd(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
 	motionTouching = NO;
+	UIView *bar = nil;
+	double scale = 1.0;
+	@try { bar = motionBarOf(self); scale = motionBarScale(bar); } @catch (id e) { bar = nil; }
 	((void (*)(id, SEL, id, id))origButtonEnd)(self, _cmd, touch, event);
+	@try { motionBarBounce(bar, scale); } @catch (id e) {}
 }
 static void buttonCancel(UIView *self, SEL _cmd, UIEvent *event) {
 	motionTouching = NO;
+	UIView *bar = nil;
+	double scale = 1.0;
+	@try { bar = motionBarOf(self); scale = motionBarScale(bar); } @catch (id e) { bar = nil; }
 	((void (*)(id, SEL, id))origButtonCancel)(self, _cmd, event);
+	@try { motionBarBounce(bar, scale); } @catch (id e) {}
 }
 
 // the class's own method is replaced; one it only inherits gets an own method that calls the inherited one

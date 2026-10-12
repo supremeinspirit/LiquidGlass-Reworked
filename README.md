@@ -32,7 +32,7 @@ Only these devices. Everything else is untested.
 
 | Variant | Device | iOS | Jailbreak | Status |
 | --- | --- | --- | --- | --- |
-| rootful iOS 13 port | iPhone X (iPhone10,6) | 13.3 (17C54) | unc0ver, rootful, Substitute | tested on device up to ios13.17 / ios13.18; **ios13.19 (slider glyph colours, tab bar motion) was published untested** |
+| rootful iOS 13 port | iPhone X (iPhone10,6) | 13.3 (17C54) | unc0ver, rootful, Substitute | tested on device up to ios13.17 / ios13.18; **ios13.19 / ios13.20 (slider glyph colours, tab bar motion) were published untested** |
 | rootless | iPhone 15 Pro Max (iPhone16,2) | 17.3 (21D50) | Dopamine 3.0.10, rootless, ElleKit 1.2 | tested on device |
 | rootless | iPhone 12 (iPhone13,2) | 15.2.1 (19C63) | Dopamine 3.0.9, rootless, ElleKit 1.2 | tested on device (Control Center fixes; the other fixes are iOS 17 only) |
 
@@ -87,6 +87,8 @@ New in test33 (rootless): the **light edge of the floating tab bar** follows the
 New in test37 (rootless): the tab bar's selection drop has the **sizes of the system's own glass tab bar** (big and nearly round while pressed and on a slow drag, flatter and longer the faster it travels; the sizes before with the file `/var/jb/usr/lib/LiquidAssFix/tabbar-drop-old-size`), and after a release the **resting pill behind the selected tab arrives with a springy swing** (`/var/jb/usr/lib/LiquidAssFix/no-tabbar-settle-bounce`).
 
 New in the rootful iOS 13 port `1:0.1.1-2b+ios13.19`: the **coloured Control Center slider glyphs** (yellow sun, blue speaker; `Hooks/ControlCenterSliderGlyphs.x`, off with the hidden setting `ControlCenter.SliderGlyphColors` = false) and the **tab bar selection motion** of the rootless patch as of test37 (`Hooks/TabBarMotion.x`; its switch files are looked for in `/usr/lib/LiquidAssFix/`). This build was published without having been run on a device.
+
+New in test38 (rootless) and in the rootful iOS 13 port `1:0.1.1-2b+ios13.20`: after a release the **whole floating tab bar swings back** from its pressed size (the original enlarges it by 3.5 % while a tab is held and let it glide back; now it runs a little below its size and comes back). Switch off by file: `no-tabbar-release-bounce` in `/var/jb/usr/lib/LiquidAssFix/` (rootless) or `/usr/lib/LiquidAssFix/` (rootful). The rootful build was again published without having been run on a device.
 
 ---
 

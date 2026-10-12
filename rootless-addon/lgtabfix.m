@@ -76,7 +76,7 @@
 #include <ptrauth.h>
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
-#define BUILD_TAG "t34"
+#define BUILD_TAG "t35"
 #define MAX_BUTTONS 16
 #define MAX_TRIES 3
 
@@ -207,6 +207,10 @@ static void install(void) {
 //
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-tabbar-motion (the original's motion)
 // Without the swing of the resting pill after a release only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-settle-bounce
+//
+// Since t35 the whole bar swings as well when it goes back from its pressed size: the original enlarges the bar
+// by 3.5 % while a tab is held and lets it glide back in 0.26 s; now it runs a little below its size and comes
+// back. Without that only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-release-bounce
 // The drop's sizes as before t31: /var/jb/usr/lib/LiquidAssFix/tabbar-drop-old-size
 // Without the size change from the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-pull
 // Without the lean towards the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-lean
@@ -620,9 +624,77 @@ static void motionNoteTouch(UIView *button, UITouch *touch, BOOL down) {
 	} @catch (id e) { motionTouching = NO; }
 }
 
+// How large the original draws the bar right now (1 at rest, up to 1.035 while a tab is held): read from the
+// bar's glass as it stands on screen
+static double motionBarScale(UIView *bar) {
+	Class glassClass = objc_getClass("LGLiveBackdropView");
+	if (!glassClass || !bar) return 1.0;
+	double barWidth = [bar bounds].size.width;
+	for (UIView *view in [bar subviews]) {
+		if (![view isKindOfClass:glassClass] || [view isHidden] || [view bounds].size.width < barWidth * 0.5) continue;
+		CALayer *shown = [[view layer] presentationLayer] ?: [view layer];
+		double scale = [shown transform].m11;
+		return isfinite(scale) ? scale : 1.0;
+	}
+	return 1.0;
+}
+
+// UIKit's ease-out curve (control points 0,0 / 0.58,1): the part of the way done after the part `u` of the time
+static double motionEaseOut(double u) {
+	if (u <= 0.0) return 0.0;
+	if (u >= 1.0) return 1.0;
+	double low = 0.0, high = 1.0, t = u;
+	for (int i = 0; i < 40; i++) {
+		t = (low + high) * 0.5;
+		double x = 3.0 * (1.0 - t) * t * t * 0.58 + t * t * t;
+		if (x < u) low = t; else high = t;
+	}
+	return 3.0 * (1.0 - t) * t * t + t * t * t;
+}
+
+// The bar on its way back from the size `scale` to 1: the original lets it glide there in 0.26 s. Laid on top of
+// that (Core Animation adds it to what the original animates, nothing of the original's is changed) is the
+// difference to a spring that starts at the same size, runs below 1 and comes back.
+#define MOTION_BAR_RESPONSE 0.38
+#define MOTION_BAR_DAMPING 0.35
+static int motionNoBarBounce = -1;
+static BOOL motionBarLogged;
+static void motionBarBounce(UIView *bar, double scale) {
+	if (motionNoBarBounce < 0) motionNoBarBounce = access(CTLDIR "/no-tabbar-release-bounce", F_OK) == 0;
+	double extra = scale - 1.0;
+	if (motionNoBarBounce || !bar || !isfinite(extra) || extra < 0.004 || extra > 0.2) return;
+	const int count = 60;
+	NSMutableArray *values = [NSMutableArray arrayWithCapacity:count + 1];
+	double spring = 1.0, speed = 0.0;
+	for (int i = 0; i <= count; i++) {
+		double glide = 1.0 - motionEaseOut((i / 60.0) / 0.26);
+		[values addObject:[NSNumber numberWithDouble:i == count ? 0.0 : extra * (spring - glide)]];
+		motionSpring(&spring, &speed, 0.0, MOTION_BAR_RESPONSE, MOTION_BAR_DAMPING, 1.0 / 60.0);
+	}
+	static const char *paths[] = { "transform.scale.x", "transform.scale.y" };
+	static const char *keys[] = { "lgtabfixBarBounceX", "lgtabfixBarBounceY" };
+	for (int i = 0; i < 2; i++) {
+		CAKeyframeAnimation *animation = [CAKeyframeAnimation animationWithKeyPath:[NSString stringWithUTF8String:paths[i]]];
+		[animation setValues:values];
+		[animation setDuration:count / 60.0];
+		[animation setAdditive:YES];
+		[[bar layer] addAnimation:animation forKey:[NSString stringWithUTF8String:keys[i]]];
+	}
+	if (!motionBarLogged) {
+		motionBarLogged = YES;
+		tlog("tab bar: the bar swings back from %.3f times its size after the release (logged once)", scale);
+	}
+}
+static void motionBarBounceStop(UIView *bar) {
+	if (!bar) return;
+	[[bar layer] removeAnimationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceX"]];
+	[[bar layer] removeAnimationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceY"]];
+}
+
 static BOOL buttonBegin(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
 	installMotion();
 	motionNoteTouch(self, touch, YES);
+	@try { motionBarBounceStop(motionBarOf(self)); } @catch (id e) {}
 	return ((BOOL (*)(id, SEL, id, id))origButtonBegin)(self, _cmd, touch, event);
 }
 static BOOL buttonContinue(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
@@ -631,11 +703,19 @@ static BOOL buttonContinue(UIView *self, SEL _cmd, UITouch *touch, UIEvent *even
 }
 static void buttonEnd(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
 	motionTouching = NO;
+	UIView *bar = nil;
+	double scale = 1.0;
+	@try { bar = motionBarOf(self); scale = motionBarScale(bar); } @catch (id e) { bar = nil; }
 	((void (*)(id, SEL, id, id))origButtonEnd)(self, _cmd, touch, event);
+	@try { motionBarBounce(bar, scale); } @catch (id e) {}
 }
 static void buttonCancel(UIView *self, SEL _cmd, UIEvent *event) {
 	motionTouching = NO;
+	UIView *bar = nil;
+	double scale = 1.0;
+	@try { bar = motionBarOf(self); scale = motionBarScale(bar); } @catch (id e) { bar = nil; }
 	((void (*)(id, SEL, id))origButtonCancel)(self, _cmd, event);
+	@try { motionBarBounce(bar, scale); } @catch (id e) {}
 }
 
 // the class's own method is replaced; one it only inherits gets an own method that calls the inherited one
@@ -2228,7 +2308,9 @@ static void fakeTick(id self, SEL _cmd, id link) {
 // a second, 128 a tap flies to the tab, arrives and settles within 1.2 s, 256 the finger far above the bar leans
 // the drop upwards by less than 30.5 pt and it is back on the middle line after the release, 512 a finger 100 pt
 // past the last tab pulls the drop 34 pt past it, 1024 on a release the shape gets 3 to 13 pt flatter than the
-// resting pill, and the pill then carries an additive swing that starts at the drop's last size and ends at 0.
+// resting pill, and the pill then carries an additive swing that starts at the drop's last size and ends at 0,
+// 2048 the bar's swing after a release starts at its pressed size, goes below its own size and ends on it, is
+// taken off again by a new touch, and a bar that was not enlarged gets none.
 int lgtabfix_motiontest(const char *arg) {
 	(void)arg;
 	@autoreleasepool {
@@ -2363,6 +2445,27 @@ int lgtabfix_motiontest(const char *arg) {
 		while (!f->finished && ticks < 120) { STEP(1.0 / 60.0); ticks++; }
 		fprintf(stderr, "motion test: tap finished after %d ticks at %.2f,%.2fx%.2f\n", ticks, f->x, f->w, f->h);
 		if (f->finished && ticks <= 72 && fabs(f->x - 120.0) < 1.0) result += 128;
+		// the whole bar after a release from 1.035 times its size: with the original's glide it must start at that
+		// size, go below 1 and end at 1
+		{
+			motionBarBounce(bar, 1.035);
+			CAKeyframeAnimation *swing = (CAKeyframeAnimation *)[[bar layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceX"]];
+			NSArray *swingValues = swing ? [swing values] : nil;
+			double start = 1000.0, lowest = 10.0, highest = 0.0, end = 1000.0;
+			for (NSUInteger i = 0; i < [swingValues count]; i++) {
+				double total = 1.0 + 0.035 * (1.0 - motionEaseOut((i / 60.0) / 0.26)) + [[swingValues objectAtIndex:i] doubleValue];
+				if (i == 0) start = total;
+				if (i > 0) { lowest = fmin(lowest, total); highest = fmax(highest, total); }
+				end = total;
+			}
+			fprintf(stderr, "motion test: bar swing starts at %.4f, lowest %.4f, highest after the start %.4f, ends at %.4f\n", start, lowest, highest, end);
+			if (swing && [swing isAdditive] && fabs(start - 1.035) < 1e-9 && lowest < 0.995 && lowest > 0.97 && highest < 1.035 && fabs(end - 1.0) < 1e-9
+				&& [[bar layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceY"]]) result += 2048;
+			motionBarBounceStop(bar);
+			if ([[bar layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceX"]]) result -= 2048;
+			motionBarBounce(bar, 1.001);
+			if ([[bar layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixBarBounceX"]]) result -= 2048;
+		}
 		if (exact) result += 2;
 		return result;
 	}
