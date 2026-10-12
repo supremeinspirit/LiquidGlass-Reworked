@@ -10,7 +10,7 @@
 // Text Loupe: TextLoupe.Enabled (bool, default on; read by LiquidAssFixApps in every app). The lens is drawn with
 // the renderer's "PrefsSlider" glass, so the page shows that host's stock parameter items (PrefsSlider.*).
 // Search Fields: SearchField.Enabled (bool, default on; read by LiquidAssFixApps in every app). Drawn with the
-// "SearchPill" glass, the page links to that surface.
+// "Spotlight" glass (the Spotlight Search Bar), the page links to that surface.
 //
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-prefs-page
 
@@ -112,9 +112,9 @@ static NSArray *searchFieldItems(void) {
 	                                     "Liquid glass in place of the grey backing of text bars: search fields in all apps and Safari's address bar. Blur and tint apply within a few seconds, switching on or off when the app is opened again.") mutableCopy];
 	[enabled setObject:S("SearchField.Enabled") forKey:S("key")];
 	[enabled setObject:[NSNumber numberWithBool:YES] forKey:S("default")];
-	NSMutableDictionary *blur = [item("slider", "Blur", "Softness of what shows through the bar. 0 is clear glass.") mutableCopy];
+	NSMutableDictionary *blur = [item("slider", "Blur", "Own softness of what shows through the text bars, in place of the Spotlight Search Bar's. 0 is clear glass.") mutableCopy];
 	[blur setObject:S("SearchField.Blur") forKey:S("key")];
-	[blur setObject:[NSNumber numberWithDouble:5.0] forKey:S("default")];
+	[blur setObject:[NSNumber numberWithDouble:0.0] forKey:S("default")];
 	[blur setObject:[NSNumber numberWithDouble:0.0] forKey:S("min")];
 	[blur setObject:[NSNumber numberWithDouble:30.0] forKey:S("max")];
 	[blur setObject:[NSNumber numberWithInteger:1] forKey:S("decimals")];
@@ -125,9 +125,9 @@ static NSArray *searchFieldItems(void) {
 	[tint setObject:S("#00000000") forKey:S("default")];
 	[tint setObject:S("SearchField.Enabled") forKey:S("enabled_key")];
 	[tint setObject:[NSNumber numberWithBool:YES] forKey:S("enabled_default")];
-	NSDictionary *section = item("section", "Rim", "Rim width and refraction are those of the Search Pill glass.");
-	NSMutableDictionary *pill = [item("nav", "Search Pill", "") mutableCopy];
-	[pill setObject:S("SearchPill") forKey:S("surface_identifier")];
+	NSDictionary *section = item("section", "Glass", "Text bars are drawn with the glass and the pill shape of the Spotlight Search Bar: rim, refraction, blur and tints are set there.");
+	NSMutableDictionary *pill = [item("nav", "Spotlight Search Bar", "") mutableCopy];
+	[pill setObject:S("Spotlight") forKey:S("surface_identifier")];
 	return [NSArray arrayWithObjects:enabled, blur, tint, section, pill, nil];
 }
 

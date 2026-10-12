@@ -76,7 +76,7 @@
 #include <ptrauth.h>
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
-#define BUILD_TAG "t25"
+#define BUILD_TAG "t29"
 #define MAX_BUTTONS 16
 #define MAX_TRIES 3
 
@@ -174,6 +174,383 @@ static void install(void) {
 	if (!found) return;
 	origLayout = method_setImplementation(found, (IMP)tabBarLayout);
 	hookInstalled = YES;
+}
+
+#pragma mark - tab bar selection motion
+
+// The glass drop that follows the finger over the original's floating tab bar is moved by the original's
+// LGTabBarMotionState, once per screen refresh (-tick:). There the drop runs a fixed fraction of the way to its
+// target per frame, and its stretch comes from the finger's speed at the last touch report: the motion has kinks
+// whenever the target jumps, and a drop that was stretched keeps that shape for as long as the finger rests.
+//
+// Here the same drop is moved like a soft body instead. Position, width and height each follow their target as
+// a spring, stepped in small time slices, so the motion has no kinks and is the same at every refresh rate. The
+// size follows the drop's own motion: wider and flatter the faster it travels, back with a small swing past its
+// size when it stops (also when it first lifts off the bar), and taller when the finger pulls up or down away
+// from the bar. It also leans towards the finger's height (at most 30 pt, so it never leaves the bar), and past
+// the first and the last tab it follows the finger further out than the original lets it (at most 44 pt).
+// The original still draws everything: before each of its ticks its numbers are set so that its
+// own step lands exactly on the values computed here, and its targets, its arrival checks and its hand-over to
+// the resting highlight stay as they are.
+//
+// Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-tabbar-motion (the original's motion)
+// Without the size change from the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-pull
+// Without the lean towards the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-lean
+// Without the longer way past the first and last tab only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-reach
+// Trial: /var/jb/usr/lib/LiquidAssFix/tabbar-120hz lets an app's own animations run at the screen's full
+// refresh rate (the system holds them at 60 per second on the phone unless the app asks for more in its
+// Info.plist); for the whole app, so off unless the file exists.
+
+typedef struct {
+	double x, vx, w, vw, h, vh;       // the drop as drawn, with its speeds
+	double baseW, baseH;              // its size while lifted, from the original
+	double shift, vshift;             // how far it leans up or down towards the finger
+	double restY;                     // its centre's height in the bar without that
+	double outX, outW, outH;          // what the original held after its last tick
+	double lastTime;
+	unsigned long generation;
+	int valid, pending;
+	int frames;
+	double framesFrom;
+} TabMotion;
+
+static IMP origMotionTick, origMotionStart;
+static BOOL motionInstalled, motionRateLogged, motionLogged;
+static __weak UIView *motionTouchBar;
+static double motionTouchY, motionTouchX;
+static BOOL motionTouching;
+static IMP origButtonBegin, origButtonContinue, origButtonEnd, origButtonCancel;
+
+static double motionGet(id object, const char *name) {
+	return ((double (*)(id, SEL))objc_msgSend)(object, sel_registerName(name));
+}
+static void motionSet(id object, const char *name, double value) {
+	((void (*)(id, SEL, double))objc_msgSend)(object, sel_registerName(name), value);
+}
+static BOOL motionFlag(id object, const char *name) {
+	return ((BOOL (*)(id, SEL))objc_msgSend)(object, sel_registerName(name));
+}
+
+// one spring, stepped in slices of at most 1/240 s
+static void motionSpring(double *value, double *speed, double target, double response, double damping, double dt) {
+	double omega = 2.0 * M_PI / response;
+	while (dt > 1e-6) {
+		double step = fmin(dt, 1.0 / 240.0);
+		double acceleration = (target - *value) * omega * omega - 2.0 * damping * omega * (*speed);
+		*speed += acceleration * step;
+		*value += *speed * step;
+		dt -= step;
+	}
+}
+
+// The original's own size step (LGTabBarSpringStep, damping 1) from rest: the part of the distance to the target
+// that is left after dt
+static double motionOriginalSizeFactor(double response, double dt) {
+	double current = 1.0, velocity = 0.0;
+	double remaining = fmin(fmax(dt, 0.0), 1.0 / 30.0);
+	while (remaining > 0.0) {
+		double step = fmin(remaining, 1.0 / 120.0);
+		double omega = 2.0 * M_PI / response;
+		double acceleration = (0.0 - current) * omega * omega - 2.0 * omega * velocity;
+		velocity += acceleration * step;
+		current += velocity * step;
+		remaining -= step;
+	}
+	return current;
+}
+
+static TabMotion *motionFor(id state) {
+	NSMutableData *data = objc_getAssociatedObject(state, KEY("lgtabfix_motion"));
+	if (!data) {
+		data = [NSMutableData dataWithLength:sizeof(TabMotion)];
+		objc_setAssociatedObject(state, KEY("lgtabfix_motion"), data, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	return (TabMotion *)[data mutableBytes];
+}
+
+static double motionRestY;         // the drop's centre height in the bar, as the original last placed it
+
+// height added by a finger that left the bar upwards or downwards
+static double motionPull(UIView *bar, UIView *lens) {
+	if (!motionTouching || motionTouchBar != bar || access(CTLDIR "/no-tabbar-pull", F_OK) == 0) return 0.0;
+	double away = fabs(motionTouchY - motionRestY) - 26.0;
+	if (away <= 0.0) return 0.0;
+	return 14.0 * (1.0 - exp(-away / 60.0));
+}
+
+// Where the drop is to go while it is under the finger: between the first and the last tab the original's target;
+// a finger further out pulls it past them, by 3.4 times the square root of the finger's distance, at most
+// MOTION_REACH_MAX (the original: 1.24 times the root).
+#define MOTION_REACH_MAX 44.0
+static double motionReach(UIView *bar, double targetX) {
+	if (!motionTouching || motionTouchBar != bar || access(CTLDIR "/no-tabbar-reach", F_OK) == 0) return targetX;
+	Class buttonClass = objc_getClass("UITabBarButton");
+	if (!buttonClass) return targetX;
+	double first = 0.0, last = 0.0;
+	int count = 0;
+	for (UIView *view in [bar subviews]) {
+		if (![view isKindOfClass:buttonClass]) continue;
+		double middle = CGRectGetMidX([view frame]);
+		if (count == 0 || middle < first) first = middle;
+		if (count == 0 || middle > last) last = middle;
+		count++;
+	}
+	if (count < 1) return targetX;
+	if (motionTouchX > last) return last + fmin(3.4 * sqrt(motionTouchX - last), MOTION_REACH_MAX);
+	if (motionTouchX < first) return first - fmin(3.4 * sqrt(first - motionTouchX), MOTION_REACH_MAX);
+	return targetX;
+}
+
+// Sets the original's numbers so that its step ends on the drop computed here. Returns NO to leave the tick alone.
+static BOOL motionPrepare(id state, id link) {
+	UIView *lens = ((id (*)(id, SEL))objc_msgSend)(state, sel_registerName("lens"));
+	UIView *bar = ((id (*)(id, SEL))objc_msgSend)(state, sel_registerName("bar"));
+	if (!lens || !bar || [lens isHidden]) return NO;
+	double renderedX = motionGet(state, "renderedCenterX"), renderedW = motionGet(state, "renderedWidth"), renderedH = motionGet(state, "renderedHeight");
+	double targetX = motionGet(state, "targetCenterX"), targetW = motionGet(state, "targetWidth"), targetH = motionGet(state, "targetHeight");
+	BOOL active = motionFlag(state, "active"), flying = motionFlag(state, "awaitingTapDestination");
+	BOOL settling = motionFlag(state, "awaitingRestingShape"), dragged = motionFlag(state, "dragged");
+	unsigned long generation = ((unsigned long (*)(id, SEL))objc_msgSend)(state, sel_registerName("generation"));
+	double last = motionGet(state, "lastDisplayTime");
+	double now = ((double (*)(id, SEL))objc_msgSend)(link, sel_registerName("timestamp"));
+	if (!isfinite(renderedX) || !isfinite(renderedW) || !isfinite(renderedH) || !isfinite(targetX) || !isfinite(targetW) || !isfinite(targetH)) return NO;
+
+	TabMotion *m = motionFor(state);
+	BOOL fresh = !m->valid || m->generation != generation;
+	BOOL moved = fabs(renderedX - m->outX) > 0.01 || fabs(renderedW - m->outW) > 0.01 || fabs(renderedH - m->outH) > 0.01;
+	BOOL stale = now - m->lastTime > 0.25 || now < m->lastTime;
+	double dt = 1.0 / 60.0;
+	if (fresh || moved || stale) {
+		// the original set the drop itself (a new touch, or a stop in between): taken over from there, at rest
+		m->x = renderedX; m->w = renderedW; m->h = renderedH;
+		m->vx = m->vw = m->vh = 0.0;
+		if (fresh) m->shift = m->vshift = 0.0;
+		if (fresh && !settling && targetW >= 40.0 && targetW <= 220.0 && targetH >= 30.0 && targetH <= 140.0) {
+			m->baseW = targetW;
+			m->baseH = targetH;
+		}
+		m->generation = generation;
+		m->valid = 1;
+		m->frames = 0;
+	} else {
+		dt = fmin(fmax(now - m->lastTime, 1.0 / 240.0), 1.0 / 20.0);
+	}
+	if (m->baseW <= 0.0 || m->baseH <= 0.0) return NO;
+
+	double wantW = targetW, wantH = targetH;
+	double responseX = 0.22, dampingX = 1.0, responseSize = 0.20, dampingSize = 1.0;
+	if (!settling) {
+		// lifted: flatter and wider with its own speed, taller with the finger's distance from the bar
+		double speed = fmin(fabs(m->vx) / 1000.0, 1.0);
+		speed = pow(speed, 0.8);
+		double pull = motionPull(bar, lens);
+		wantW = m->baseW + 24.0 * speed - 0.35 * pull;
+		wantH = m->baseH - 14.0 * speed + pull;
+		if (flying || !dragged) { responseX = 0.26; dampingX = 0.85; }      // on its way to a tapped tab
+		else                    { responseX = 0.13; dampingX = 0.92; }      // under the finger
+		responseSize = 0.26;
+		dampingSize = 0.45;
+	}
+	double goalX = !settling && !flying && active && dragged ? motionReach(bar, targetX) : targetX;
+	motionSpring(&m->x, &m->vx, goalX, responseX, dampingX, dt);
+	motionSpring(&m->w, &m->vw, wantW, responseSize, dampingSize, dt);
+	motionSpring(&m->h, &m->vh, wantH, responseSize, dampingSize, dt);
+	if (!isfinite(m->x) || !isfinite(m->w) || !isfinite(m->h) || !isfinite(m->vx) || !isfinite(m->vw) || !isfinite(m->vh)) {
+		m->valid = 0;
+		return NO;
+	}
+	m->w = fmin(fmax(m->w, 20.0), 260.0);
+	m->h = fmin(fmax(m->h, 20.0), 110.0);
+
+	// the original's step, backwards: where its numbers have to stand so that it ends on m->x / m->w / m->h
+	double originalDt = last > 0.0 ? now - last : 1.0 / 60.0;
+	if (originalDt > 1.0 / 30.0) originalDt = 1.0 / 30.0;
+	double frameFactor = fmin(fmax(originalDt * 60.0, 0.35), 1.4);
+	double lerp = (active ? 0.21 : 0.14) * frameFactor;
+	double sizeFactor = motionOriginalSizeFactor(active ? 0.155 : 0.135, originalDt);
+	if (lerp >= 0.9 || sizeFactor < 0.05) return NO;
+	motionSet(state, "setRenderedCenterX:", (m->x - targetX * lerp) / (1.0 - lerp));
+	motionSet(state, "setRenderedWidth:", targetW + (m->w - targetW) / sizeFactor);
+	motionSet(state, "setRenderedHeight:", targetH + (m->h - targetH) / sizeFactor);
+	motionSet(state, "setWidthVelocity:", 0.0);
+	motionSet(state, "setHeightVelocity:", 0.0);
+	m->lastTime = now;
+	m->pending = 1;
+
+	// how often the drop is drawn: one line per process
+	if (!motionRateLogged && active && dragged) {
+		if (m->frames == 0) m->framesFrom = now;
+		if (++m->frames == 41) {
+			motionRateLogged = YES;
+			double span = now - m->framesFrom;
+			if (span > 0.0) tlog("tab bar: the selection drop is drawn %.0f times per second in this app (logged once)", 40.0 / span);
+		}
+	}
+	return YES;
+}
+
+// After the original placed the drop on the bar's middle line: moved up or down a little, towards the finger.
+// The coloured copy of the icons under the drop (a view of the bar with a mask view the original moves with the
+// drop) is moved along.
+#define MOTION_LEAN_MAX 30.0
+static void motionLean(id state, TabMotion *m) {
+	UIView *lens = ((id (*)(id, SEL))objc_msgSend)(state, sel_registerName("lens"));
+	UIView *bar = ((id (*)(id, SEL))objc_msgSend)(state, sel_registerName("bar"));
+	if (!lens || !bar || [lens isHidden] || access(CTLDIR "/no-tabbar-lean", F_OK) == 0) { m->shift = m->vshift = 0.0; return; }
+	CGPoint centre = [lens center];
+	m->restY = centre.y;
+	motionRestY = centre.y;
+	BOOL settling = motionFlag(state, "awaitingRestingShape"), flying = motionFlag(state, "awaitingTapDestination");
+	double want = 0.0;
+	if (!settling && !flying && motionTouching && motionTouchBar == bar)
+		want = MOTION_LEAN_MAX * tanh((motionTouchY - centre.y) / 85.0);
+	motionSpring(&m->shift, &m->vshift, want, want == 0.0 ? 0.16 : 0.20, want == 0.0 ? 1.0 : 0.75, 1.0 / 60.0);
+	if (!isfinite(m->shift) || !isfinite(m->vshift)) { m->shift = m->vshift = 0.0; return; }
+	m->shift = fmin(fmax(m->shift, -MOTION_LEAN_MAX - 4.0), MOTION_LEAN_MAX + 4.0);
+	if (fabs(m->shift) < 0.05) return;
+	[lens setCenter:CGPointMake(centre.x, centre.y + m->shift)];
+	for (UIView *view in [bar subviews]) {
+		UIView *mask = [view maskView];
+		if (!mask || view == lens || ![view clipsToBounds]) continue;
+		CGRect frame = [mask frame];
+		frame.origin.y += m->shift;
+		[mask setFrame:frame];
+	}
+}
+
+static void motionTick(id self, SEL _cmd, id link) {
+	BOOL mine = NO;
+	@try { mine = motionPrepare(self, link); } @catch (id e) { mine = NO; }
+	((void (*)(id, SEL, id))origMotionTick)(self, _cmd, link);
+	if (!mine) return;
+	@try {
+		TabMotion *m = motionFor(self);
+		m->pending = 0;
+		m->outX = motionGet(self, "renderedCenterX");
+		m->outW = motionGet(self, "renderedWidth");
+		m->outH = motionGet(self, "renderedHeight");
+		motionLean(self, m);
+		if (!motionLogged) {
+			motionLogged = YES;
+			tlog("tab bar: selection drop moved by the add-on (drop %.0fx%.0f; logged once)", m->baseW, m->baseH);
+		}
+	} @catch (id e) {}
+}
+
+// the drop's timer may run at the screen's full rate where the app is allowed to
+static void motionStart(id self, SEL _cmd) {
+	((void (*)(id, SEL))origMotionStart)(self, _cmd);
+	@try {
+		id link = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("displayLink"));
+		SEL rangeSel = sel_registerName("setPreferredFrameRateRange:");
+		if (link && [link respondsToSelector:rangeSel] && !objc_getAssociatedObject(link, KEY("lgtabfix_rate"))) {
+			CAFrameRateRange range = CAFrameRateRangeMake(80.0f, 120.0f, 120.0f);
+			((void (*)(id, SEL, CAFrameRateRange))objc_msgSend)(link, rangeSel, range);
+			objc_setAssociatedObject(link, KEY("lgtabfix_rate"), [NSNumber numberWithBool:YES], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		}
+	} @catch (id e) {}
+}
+
+static Method motionOwnMethod(Class cls, SEL sel) {
+	unsigned int count = 0;
+	Method *own = class_copyMethodList(cls, &count);
+	Method found = NULL;
+	for (unsigned int i = 0; i < count; i++)
+		if (method_getName(own[i]) == sel) found = own[i];
+	free(own);
+	return found;
+}
+
+// The original's class exists once the original is loaded (after this library): looked for at the first touch
+static void installMotion(void) {
+	if (motionInstalled) return;
+	Class cls = objc_getClass("LGTabBarMotionState");
+	if (!cls) return;
+	motionInstalled = YES;
+	if (access(CTLDIR "/no-tabbar-motion", F_OK) == 0) return;
+	static const char *needed[] = { "lens", "bar", "displayLink", "active", "dragged", "generation", "awaitingTapDestination",
+		"awaitingRestingShape", "lastDisplayTime", "targetCenterX", "targetWidth", "targetHeight", "renderedCenterX", "renderedWidth",
+		"renderedHeight", "setRenderedCenterX:", "setRenderedWidth:", "setRenderedHeight:", "setWidthVelocity:", "setHeightVelocity:" };
+	for (unsigned int i = 0; i < sizeof(needed) / sizeof(needed[0]); i++)
+		if (!class_getInstanceMethod(cls, sel_registerName(needed[i]))) {
+			tlog("tab bar: the original's motion has no '%s' here, left as it is", needed[i]);
+			return;
+		}
+	Method tick = motionOwnMethod(cls, sel_registerName("tick:")), start = motionOwnMethod(cls, sel_registerName("start"));
+	if (!tick || !start) return;
+	origMotionStart = method_setImplementation(start, (IMP)motionStart);
+	origMotionTick = method_setImplementation(tick, (IMP)motionTick);
+}
+
+static UIView *motionBarOf(UIView *button) {
+	Class barClass = [UITabBar class];
+	for (UIView *view = [button superview]; view; view = [view superview])
+		if ([view isKindOfClass:barClass]) return view;
+	return nil;
+}
+
+static void motionNoteTouch(UIView *button, UITouch *touch, BOOL down) {
+	@try {
+		UIView *bar = down && touch ? motionBarOf(button) : nil;
+		if (!bar) { motionTouching = NO; return; }
+		motionTouchBar = bar;
+		CGPoint point = [touch locationInView:bar];
+		motionTouchY = point.y;
+		motionTouchX = point.x;
+		motionTouching = YES;
+	} @catch (id e) { motionTouching = NO; }
+}
+
+static BOOL buttonBegin(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
+	installMotion();
+	motionNoteTouch(self, touch, YES);
+	return ((BOOL (*)(id, SEL, id, id))origButtonBegin)(self, _cmd, touch, event);
+}
+static BOOL buttonContinue(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
+	motionNoteTouch(self, touch, YES);
+	return ((BOOL (*)(id, SEL, id, id))origButtonContinue)(self, _cmd, touch, event);
+}
+static void buttonEnd(UIView *self, SEL _cmd, UITouch *touch, UIEvent *event) {
+	motionTouching = NO;
+	((void (*)(id, SEL, id, id))origButtonEnd)(self, _cmd, touch, event);
+}
+static void buttonCancel(UIView *self, SEL _cmd, UIEvent *event) {
+	motionTouching = NO;
+	((void (*)(id, SEL, id))origButtonCancel)(self, _cmd, event);
+}
+
+// the class's own method is replaced; one it only inherits gets an own method that calls the inherited one
+static IMP motionHook(Class cls, const char *name, IMP mine) {
+	SEL sel = sel_registerName(name);
+	Method method = class_getInstanceMethod(cls, sel);
+	if (!method) return NULL;
+	IMP before = method_getImplementation(method);
+	if (!class_addMethod(cls, sel, mine, method_getTypeEncoding(method)))
+		before = method_setImplementation(method, mine);
+	return before;
+}
+
+static void installMotionTouches(void) {
+	if (origButtonBegin || access(CTLDIR "/no-tabbar-motion", F_OK) == 0) return;
+	Class cls = objc_getClass("UITabBarButton");
+	if (!cls || ![cls isSubclassOfClass:[UIControl class]]) return;
+	Class control = [UIControl class];
+	static const char *tracking[] = { "beginTrackingWithTouch:withEvent:", "continueTrackingWithTouch:withEvent:",
+		"endTrackingWithTouch:withEvent:", "cancelTrackingWithEvent:" };
+	for (int i = 0; i < 4; i++)
+		if (!class_getInstanceMethod(control, sel_registerName(tracking[i]))) return;
+	origButtonBegin = motionHook(cls, "beginTrackingWithTouch:withEvent:", (IMP)buttonBegin);
+	origButtonContinue = motionHook(cls, "continueTrackingWithTouch:withEvent:", (IMP)buttonContinue);
+	origButtonEnd = motionHook(cls, "endTrackingWithTouch:withEvent:", (IMP)buttonEnd);
+	origButtonCancel = motionHook(cls, "cancelTrackingWithEvent:", (IMP)buttonCancel);
+	if (access(CTLDIR "/tabbar-120hz", F_OK) == 0) {
+		@try {
+			id info = [[NSBundle mainBundle] infoDictionary];
+			if ([info respondsToSelector:@selector(setObject:forKey:)])
+				[(NSMutableDictionary *)info setObject:[NSNumber numberWithBool:YES]
+				                               forKey:[NSString stringWithUTF8String:"CADisableMinimumFrameDurationOnPhone"]];
+		} @catch (id e) {}
+	}
 }
 
 #pragma mark - keyboard key radius
@@ -544,6 +921,7 @@ static void loupeSetBand(UIView *portal, BOOL on) {
 }
 
 #define FIELD_BLUR_DEFAULT 5.0
+#define FIELD_HOST_BLUR_DEFAULT 0.0   // the Spotlight bar's blur when none was set
 static double fieldBlur = FIELD_BLUR_DEFAULT;   // search fields: "SearchField.Blur", asked together with fieldWanted
 static UIColor *fieldTint;             // search fields: "SearchField.TintColor" (#RRGGBBAA), nil = none
 #define LOUPE_STRIP 240.0             // height of the window strips above and below a glass text bar
@@ -904,13 +1282,18 @@ static void installLoupe(void) {
 
 // Search fields as a pane of glass: the system's search field (UISearchTextField, every app) and Safari's
 // address capsule (SFCapsuleView). The field's own grey backing is left out (empty mask, nothing is removed) and
-// a glass of the original (host "SearchPill", so the Search Pill values apply) lies in its place, under the
-// field's text. On when the tweak is on; "SearchField.Enabled" = false in the settings switches it off.
-// Own values: "SearchField.Blur" (the glass's blur, in place of the Search Pill's) and "SearchField.TintColor"
-// (a colour laid over the glass). Rim and refraction are the Search Pill's.
+// a glass of the original lies in its place, under the field's text. It is the glass of the Spotlight search
+// bar (host "Spotlight": its rim, refraction, blur and tints, as set on the "Spotlight Search Bar" page) in the
+// Spotlight bar's shape, a full pill. On when the tweak is on; "SearchField.Enabled" = false in the settings
+// switches it off. Own values, only when they were set: "SearchField.Blur" (in place of the Spotlight bar's
+// blur) and "SearchField.TintColor" (a colour laid over the glass).
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-searchfield-glass
+// The look before (Search Pill glass, the field's own corner radius, blur 5):
+// create /var/jb/usr/lib/LiquidAssFix/searchfield-old-style
 
-#define FIELD_HOST "SearchPill"
+#define FIELD_HOST "Spotlight"
+#define FIELD_HOST_OLD "SearchPill"
+static BOOL fieldOldStyle;
 #define FIELD_KINDS 2                // 0 = system search field, 1 = Safari capsule
 
 static const char *fieldClassNames[FIELD_KINDS] = { "UISearchTextField", "SFCapsuleView" };
@@ -931,6 +1314,111 @@ static UIColor *fieldColorFromHex(id text) {
 	unsigned int r, g, b, a;
 	if (!hex || strlen(hex) != 9 || sscanf(hex, "#%02x%02x%02x%02x", &r, &g, &b, &a) != 4 || a == 0) return nil;
 	return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:a / 255.0];
+}
+
+// Moving highlight: the original turns the light edge of its glasses with the phone's tilt ("Specular Motion"),
+// but only inside SpringBoard; in apps the edge stands still. For the text bars the same is done here: while
+// that setting is on, a text bar glass is on screen and the app is in front, the tilt is read 30 times a second
+// and the bars' light edge is turned by the original's own rule (-applySpecularAngle:). Stops by itself when no
+// bar is visible or the app leaves the front.
+// Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-searchfield-motion
+static BOOL fieldMotionOn;
+static double fieldMotionSensitivity = 2.0;
+static id fieldMotionManager;
+static dispatch_source_t fieldMotionTimer;
+static double fieldMotionAngle = -M_PI_4, fieldMotionApplied = -100.0;
+static int fieldMotionIdle, fieldMotionTicks;
+static BOOL fieldMotionLogged, fieldMotionObserving;
+
+static void fieldMotionStop(void) {
+	if (fieldMotionTimer) { dispatch_source_cancel(fieldMotionTimer); fieldMotionTimer = NULL; }
+	@try {
+		if (fieldMotionManager) ((void (*)(id, SEL))objc_msgSend)(fieldMotionManager, sel_registerName("stopDeviceMotionUpdates"));
+	} @catch (id e) {}
+}
+
+static void fieldMotionApply(double angle) {
+	SEL sel = sel_registerName("applySpecularAngle:");
+	[CATransaction begin];
+	[CATransaction setDisableActions:YES];
+	for (UIView *owner in [fieldOwners allObjects]) {
+		UIView *glass = objc_getAssociatedObject(owner, KEY("lgfix_fieldGlass"));
+		if (glass && [glass window] && ![glass isHidden] && [glass respondsToSelector:sel])
+			((void (*)(id, SEL, CGFloat))objc_msgSend)(glass, sel, angle);
+	}
+	[CATransaction commit];
+}
+
+static void fieldMotionTick(void *unused) {
+	@try {
+		BOOL visible = NO;
+		for (UIView *owner in [fieldOwners allObjects]) {
+			UIView *glass = objc_getAssociatedObject(owner, KEY("lgfix_fieldGlass"));
+			if (glass && [glass window] && ![glass isHidden]) { visible = YES; break; }
+		}
+		BOOL front = [[UIApplication sharedApplication] applicationState] == UIApplicationStateActive;
+		if (!fieldMotionOn || !front || !visible) {
+			if (!fieldMotionOn || !front || ++fieldMotionIdle > 60) {
+				if (!fieldMotionOn) { fieldMotionAngle = -M_PI_4; fieldMotionApply(fieldMotionAngle); fieldMotionApplied = -100.0; }
+				fieldMotionStop();
+			}
+			return;
+		}
+		fieldMotionIdle = 0;
+		id motion = ((id (*)(id, SEL))objc_msgSend)(fieldMotionManager, sel_registerName("deviceMotion"));
+		id attitude = motion ? ((id (*)(id, SEL))objc_msgSend)(motion, sel_registerName("attitude")) : nil;
+		if (!attitude) return;
+		double roll = ((double (*)(id, SEL))objc_msgSend)(attitude, sel_registerName("roll"));
+		double pitch = ((double (*)(id, SEL))objc_msgSend)(attitude, sel_registerName("pitch"));
+		double yaw = ((double (*)(id, SEL))objc_msgSend)(attitude, sel_registerName("yaw"));
+		double target = (roll * 1.2 + pitch * 1.2 + yaw) * (fieldMotionSensitivity * 1.2);
+		if (!isfinite(target)) return;
+		double delta = atan2(sin(target - fieldMotionAngle), cos(target - fieldMotionAngle));
+		fieldMotionAngle += delta * (1.0 - exp(-14.0 / 30.0));
+		// a glass puts its edge back to the resting angle when it is laid out: set again twice a second anyway
+		if (fabs(fieldMotionAngle - fieldMotionApplied) > 0.002 || ++fieldMotionTicks >= 15) {
+			fieldMotionTicks = 0;
+			fieldMotionApplied = fieldMotionAngle;
+			fieldMotionApply(fieldMotionAngle);
+			if (!fieldMotionLogged) {
+				fieldMotionLogged = YES;
+				tlog("search field: light edge follows the tilt (logged once)");
+			}
+		}
+	} @catch (id e) {}
+}
+
+static void fieldMotionEnsure(void);
+static void fieldMotionAppActive(CFNotificationCenterRef center, void *observer, CFNotificationName name, const void *object, CFDictionaryRef info) {
+	fieldMotionEnsure();
+}
+
+static void fieldMotionEnsure(void) {
+	if (fieldMotionTimer || !fieldMotionOn || fieldTestCreate || access(CTLDIR "/no-searchfield-motion", F_OK) == 0) return;
+	@try {
+		if (![UIApplication sharedApplication]) return;
+		if (!fieldMotionManager) {
+			dlopen("/System/Library/Frameworks/CoreMotion.framework/CoreMotion", RTLD_NOW);
+			Class cls = objc_getClass("CMMotionManager");
+			if (!cls) return;
+			fieldMotionManager = [[cls alloc] init];
+		}
+		if (!fieldMotionManager || ![fieldMotionManager respondsToSelector:sel_registerName("startDeviceMotionUpdatesUsingReferenceFrame:")]) return;
+		if (!fieldMotionObserving) {
+			fieldMotionObserving = YES;
+			CFNotificationCenterAddObserver(CFNotificationCenterGetLocalCenter(), NULL, fieldMotionAppActive,
+			                                (__bridge CFStringRef)UIApplicationDidBecomeActiveNotification, NULL,
+			                                CFNotificationSuspensionBehaviorDeliverImmediately);
+		}
+		((void (*)(id, SEL, double))objc_msgSend)(fieldMotionManager, sel_registerName("setDeviceMotionUpdateInterval:"), 1.0 / 30.0);
+		// 1 = CMAttitudeReferenceFrameXArbitraryZVertical, the original's
+		((void (*)(id, SEL, NSUInteger))objc_msgSend)(fieldMotionManager, sel_registerName("startDeviceMotionUpdatesUsingReferenceFrame:"), 1);
+		fieldMotionIdle = 0;
+		fieldMotionTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+		dispatch_source_set_timer(fieldMotionTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 30), NSEC_PER_SEC / 30, NSEC_PER_SEC / 120);
+		dispatch_source_set_event_handler_f(fieldMotionTimer, fieldMotionTick);
+		dispatch_resume(fieldMotionTimer);
+	} @catch (id e) {}
 }
 
 static void fieldsRefresh(void *unused) {
@@ -958,14 +1446,28 @@ static BOOL fieldGlassWanted(void) {
 		NSDictionary *file = [NSDictionary dictionaryWithContentsOfFile:[NSString stringWithUTF8String:PREFS_FILE]];
 		id blurValue = [file objectForKey:[NSString stringWithUTF8String:"SearchField.Blur"]];
 		id tintValue = [file objectForKey:[NSString stringWithUTF8String:"SearchField.TintColor"]];
+		id hostBlurValue = [file objectForKey:[NSString stringWithUTF8String:FIELD_HOST ".Blur"]];
 		if (![file isKindOfClass:[NSDictionary class]]) {
 			double (*prefFloat)(id, double) = dlsym(RTLD_DEFAULT, "LG_prefFloat");
 			id (*prefString)(id, id) = dlsym(RTLD_DEFAULT, "LG_prefString");
-			if (prefFloat) blurValue = [NSNumber numberWithDouble:prefFloat([NSString stringWithUTF8String:"SearchField.Blur"], FIELD_BLUR_DEFAULT)];
+			if (prefFloat) {
+				double own = prefFloat([NSString stringWithUTF8String:"SearchField.Blur"], -1.0);
+				if (own >= 0.0) blurValue = [NSNumber numberWithDouble:own];
+				hostBlurValue = [NSNumber numberWithDouble:prefFloat([NSString stringWithUTF8String:FIELD_HOST ".Blur"], FIELD_HOST_BLUR_DEFAULT)];
+			}
 			if (prefString) tintValue = prefString([NSString stringWithUTF8String:"SearchField.TintColor"], nil);
 		}
-		double blur = [blurValue isKindOfClass:[NSNumber class]] ? [blurValue doubleValue] : FIELD_BLUR_DEFAULT;
-		fieldBlur = isfinite(blur) ? fmin(50.0, fmax(0.0, blur)) : FIELD_BLUR_DEFAULT;
+		id motionValue = [file objectForKey:[NSString stringWithUTF8String:"Specular.Motion.Enabled"]];
+		id sensitivityValue = [file objectForKey:[NSString stringWithUTF8String:"Specular.Motion.Sensitivity"]];
+		fieldMotionOn = answer && [motionValue respondsToSelector:@selector(boolValue)] && [motionValue boolValue];
+		double sensitivity = [sensitivityValue respondsToSelector:@selector(doubleValue)] ? [sensitivityValue doubleValue] : 2.0;
+		fieldMotionSensitivity = isfinite(sensitivity) ? fmin(8.0, fmax(0.0, sensitivity)) : 2.0;
+		fieldOldStyle = access(CTLDIR "/searchfield-old-style", F_OK) == 0;
+		// no own blur set: the Spotlight bar's (before: 5)
+		double fallback = fieldOldStyle ? FIELD_BLUR_DEFAULT
+		                : ([hostBlurValue isKindOfClass:[NSNumber class]] ? [hostBlurValue doubleValue] : FIELD_HOST_BLUR_DEFAULT);
+		double blur = [blurValue isKindOfClass:[NSNumber class]] ? [blurValue doubleValue] : fallback;
+		fieldBlur = isfinite(blur) ? fmin(50.0, fmax(0.0, blur)) : fallback;
 		fieldTint = fieldColorFromHex(tintValue);
 	}
 	fieldWanted = answer;
@@ -1008,11 +1510,12 @@ static void fieldUpdate(UIView *owner, UIView *backing, UIView *other, CGFloat r
 		fieldSetBacking(other, NO);
 		return;
 	}
-	if (radius <= 0.0 || radius > shortSide * 0.5) radius = shortSide * 0.5;
+	// the Spotlight bar's shape: a full pill
+	if (!fieldOldStyle || radius <= 0.0 || radius > shortSide * 0.5) radius = shortSide * 0.5;
 	if (!glass) {
 		id (*create)(CGRect, id, id) = fieldTestCreate ? fieldTestCreate : loupeCreateGlass;
 		if (!create) return;
-		glass = create(frame, nil, [NSString stringWithUTF8String:FIELD_HOST]);
+		glass = create(frame, nil, [NSString stringWithUTF8String:fieldOldStyle ? FIELD_HOST_OLD : FIELD_HOST]);
 		if (!glass) return;
 		[glass setUserInteractionEnabled:NO];
 		objc_setAssociatedObject(owner, KEY("lgfix_fieldGlass"), glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1070,6 +1573,7 @@ static void fieldUpdate(UIView *owner, UIView *backing, UIView *other, CGFloat r
 	}
 	fieldSetBacking(backing, YES);
 	fieldSetBacking(other, YES);
+	if (!hidden) fieldMotionEnsure();
 }
 
 static double fieldDoubleIvar(id object, const char *name) {
@@ -1113,6 +1617,8 @@ static void capsuleLayout(UIView *self, SEL _cmd) {
 // Safari's classes come with a framework that may be loaded after this library: tried again for a while
 static void installFields(void *unused) {
 	if (access(CTLDIR "/no-searchfield-glass", F_OK) == 0) return;
+	// Spotlight's own bar already is the original's glass (the look the text bars take over): left as it is
+	if (strcmp(getprogname(), "Spotlight") == 0) return;
 	SEL sel = sel_registerName("layoutSubviews");
 	BOOL missing = NO;
 	for (int i = 0; i < FIELD_KINDS; i++) {
@@ -1192,6 +1698,7 @@ int lgtabfix_fieldtest(const char *arg) {
 __attribute__((constructor)) static void lgtabfix_init(void) {
 	if (access(CTLDIR "/disabled", F_OK) == 0) return;
 	install();
+	installMotionTouches();
 	installKeyRadius();
 	installWave(NULL);
 	installLoupe();
@@ -1431,4 +1938,205 @@ int lgtabfix_selftest(const char *arg) {
 int lgtabfix_keytest(const char *arg) {
 	(void)arg;
 	return (int)lround(fileKeyRadius() * 100.0);
+}
+
+#pragma mark - private test of the tab bar selection motion
+
+// A stand-in for the original's LGTabBarMotionState with the original's own step (Hooks/TabBar.x -tick:,
+// LGLiquidRenderedStateStep, LGTabBarSpringStep), without any drawing.
+typedef struct {
+	__unsafe_unretained id lens, bar, displayLink;
+	BOOL active, dragged, flying, settling, finished;
+	unsigned long generation;
+	double lastDisplayTime, targetX, targetW, targetH, x, w, h, widthVelocity, heightVelocity, restingW;
+} FakeState;
+static ptrdiff_t fakeOffset;
+#define FAKE(self) ((FakeState *)((uint8_t *)(__bridge void *)(self) + fakeOffset))
+static id fakeLens(id self, SEL _cmd) { return FAKE(self)->lens; }
+static id fakeBar(id self, SEL _cmd) { return FAKE(self)->bar; }
+static id fakeLink(id self, SEL _cmd) { return FAKE(self)->displayLink; }
+static BOOL fakeActive(id self, SEL _cmd) { return FAKE(self)->active; }
+static BOOL fakeDragged(id self, SEL _cmd) { return FAKE(self)->dragged; }
+static BOOL fakeFlying(id self, SEL _cmd) { return FAKE(self)->flying; }
+static BOOL fakeSettling(id self, SEL _cmd) { return FAKE(self)->settling; }
+static unsigned long fakeGeneration(id self, SEL _cmd) { return FAKE(self)->generation; }
+static double fakeLast(id self, SEL _cmd) { return FAKE(self)->lastDisplayTime; }
+static double fakeTargetX(id self, SEL _cmd) { return FAKE(self)->targetX; }
+static double fakeTargetW(id self, SEL _cmd) { return FAKE(self)->targetW; }
+static double fakeTargetH(id self, SEL _cmd) { return FAKE(self)->targetH; }
+static double fakeX(id self, SEL _cmd) { return FAKE(self)->x; }
+static double fakeW(id self, SEL _cmd) { return FAKE(self)->w; }
+static double fakeH(id self, SEL _cmd) { return FAKE(self)->h; }
+static void fakeSetX(id self, SEL _cmd, double v) { FAKE(self)->x = v; }
+static void fakeSetW(id self, SEL _cmd, double v) { FAKE(self)->w = v; }
+static void fakeSetH(id self, SEL _cmd, double v) { FAKE(self)->h = v; }
+static void fakeSetWV(id self, SEL _cmd, double v) { FAKE(self)->widthVelocity = v; }
+static void fakeSetHV(id self, SEL _cmd, double v) { FAKE(self)->heightVelocity = v; }
+static void fakeStart(id self, SEL _cmd) {}
+static double fakeNow;
+static double fakeTimestamp(id self, SEL _cmd) { return fakeNow; }
+
+static double fakeSpringStep(double current, double target, double *velocity, double response, double dampingRatio, double dt) {
+	double remaining = fmin(fmax(dt, 0.0), 1.0 / 30.0);
+	while (remaining > 0.0) {
+		double step = fmin(remaining, 1.0 / 120.0);
+		double omega = 2.0 * M_PI / response;
+		double acceleration = (target - current) * omega * omega - 2.0 * dampingRatio * omega * (*velocity);
+		*velocity += acceleration * step;
+		current += *velocity * step;
+		remaining -= step;
+	}
+	return current;
+}
+
+static void fakeTick(id self, SEL _cmd, id link) {
+	FakeState *f = FAKE(self);
+	double dt = f->lastDisplayTime > 0.0 ? fakeNow - f->lastDisplayTime : 1.0 / 60.0;
+	if (dt > 1.0 / 30.0) dt = 1.0 / 30.0;
+	f->lastDisplayTime = fakeNow;
+	[(UIView *)f->lens setCenter:CGPointMake(f->x, 30.0)];
+	double frameFactor = fmin(fmax(dt * 60.0, 0.35), 1.4);
+	double response = f->active ? 0.155 : 0.135;
+	f->x += (f->targetX - f->x) * (f->active ? 0.21 : 0.14) * frameFactor;
+	f->w = fakeSpringStep(f->w, f->targetW, &f->widthVelocity, response, 1.0, dt);
+	f->h = fakeSpringStep(f->h, f->targetH, &f->heightVelocity, response, 1.0, dt);
+	if (f->flying && fabs(f->x - f->targetX) < 1.0 && fabs(f->w - 94.0) < 1.0 && fabs(f->h - 72.0) < 1.0) {
+		f->flying = NO;
+		f->active = NO;
+		f->targetW = f->restingW;
+		f->targetH = 54.0;
+		f->settling = YES;
+	}
+	if (f->settling && fabs(f->x - f->targetX) < 0.75 && fabs(f->w - f->targetW) < 0.75 && fabs(f->h - f->targetH) < 0.75) {
+		f->settling = NO;
+		f->finished = YES;
+	}
+}
+
+// Private self-test (host, without the original): 1 the hooks went onto the stand-in, 2 after every tick the
+// stand-in holds exactly the drop computed here, 4 lifting off swings past the lifted height, 8 a fast drag makes
+// the drop flatter and wider, 16 after the stop it swings past its height and comes to rest at its size on the
+// target, 32 a finger far above the bar makes it taller, 64 a release settles into the resting shape within half
+// a second, 128 a tap flies to the tab, arrives and settles within 1.2 s, 256 the finger far above the bar leans
+// the drop upwards by less than 30.5 pt and it is back on the middle line after the release, 512 a finger 100 pt
+// past the last tab pulls the drop 34 pt past it.
+int lgtabfix_motiontest(const char *arg) {
+	(void)arg;
+	@autoreleasepool {
+		int result = 0;
+		Class cls = objc_allocateClassPair([NSObject class], "LGTabBarMotionState", 0);
+		Class linkClass = objc_allocateClassPair([NSObject class], "LGTabFixTestLink", 0);
+		if (!cls || !linkClass) return -1;
+		if (!class_addIvar(cls, "fake", sizeof(FakeState), 3, "{?=}")) return -2;
+		class_addMethod(cls, sel_registerName("lens"), (IMP)fakeLens, "@@:");
+		class_addMethod(cls, sel_registerName("bar"), (IMP)fakeBar, "@@:");
+		class_addMethod(cls, sel_registerName("displayLink"), (IMP)fakeLink, "@@:");
+		class_addMethod(cls, sel_registerName("active"), (IMP)fakeActive, "B@:");
+		class_addMethod(cls, sel_registerName("dragged"), (IMP)fakeDragged, "B@:");
+		class_addMethod(cls, sel_registerName("awaitingTapDestination"), (IMP)fakeFlying, "B@:");
+		class_addMethod(cls, sel_registerName("awaitingRestingShape"), (IMP)fakeSettling, "B@:");
+		class_addMethod(cls, sel_registerName("generation"), (IMP)fakeGeneration, "Q@:");
+		class_addMethod(cls, sel_registerName("lastDisplayTime"), (IMP)fakeLast, "d@:");
+		class_addMethod(cls, sel_registerName("targetCenterX"), (IMP)fakeTargetX, "d@:");
+		class_addMethod(cls, sel_registerName("targetWidth"), (IMP)fakeTargetW, "d@:");
+		class_addMethod(cls, sel_registerName("targetHeight"), (IMP)fakeTargetH, "d@:");
+		class_addMethod(cls, sel_registerName("renderedCenterX"), (IMP)fakeX, "d@:");
+		class_addMethod(cls, sel_registerName("renderedWidth"), (IMP)fakeW, "d@:");
+		class_addMethod(cls, sel_registerName("renderedHeight"), (IMP)fakeH, "d@:");
+		class_addMethod(cls, sel_registerName("setRenderedCenterX:"), (IMP)fakeSetX, "v@:d");
+		class_addMethod(cls, sel_registerName("setRenderedWidth:"), (IMP)fakeSetW, "v@:d");
+		class_addMethod(cls, sel_registerName("setRenderedHeight:"), (IMP)fakeSetH, "v@:d");
+		class_addMethod(cls, sel_registerName("setWidthVelocity:"), (IMP)fakeSetWV, "v@:d");
+		class_addMethod(cls, sel_registerName("setHeightVelocity:"), (IMP)fakeSetHV, "v@:d");
+		class_addMethod(cls, sel_registerName("start"), (IMP)fakeStart, "v@:");
+		class_addMethod(cls, sel_registerName("tick:"), (IMP)fakeTick, "v@:@");
+		class_addMethod(linkClass, sel_registerName("timestamp"), (IMP)fakeTimestamp, "d@:");
+		objc_registerClassPair(cls);
+		objc_registerClassPair(linkClass);
+		fakeOffset = ivar_getOffset(class_getInstanceVariable(cls, "fake"));
+		installMotion();
+		if (origMotionTick == (IMP)fakeTick && origMotionStart == (IMP)fakeStart) result += 1;
+		else return result;
+
+		UIView *bar = [[UITabBar alloc] initWithFrame:CGRectMake(0, 800, 430, 83)];
+		UIView *lens = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 94, 72)];
+		[lens setCenter:CGPointMake(100, 30)];
+		[bar addSubview:lens];
+		id link = [[linkClass alloc] init];
+		id state = [[cls alloc] init];
+		FakeState *f = FAKE(state);
+		SEL tick = sel_registerName("tick:");
+		void (*send)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
+		BOOL exact = YES;
+		fakeNow = 1000.0;
+#define STEP(seconds) do { fakeNow += (seconds); send(state, tick, link); TabMotion *mm = motionFor(state); \
+		if (!mm->valid || fabs(f->x - mm->x) > 1e-6 || fabs(f->w - mm->w) > 1e-6 || fabs(f->h - mm->h) > 1e-6) exact = NO; } while (0)
+
+		// finger down on the selected tab: the drop lifts off
+		f->lens = lens; f->bar = bar; f->generation = 1; f->active = YES;
+		f->x = 100; f->w = 78; f->h = 54; f->targetX = 100; f->targetW = 94; f->targetH = 72; f->restingW = 78;
+		double top = 0.0;
+		for (int i = 0; i < 24; i++) { STEP(1.0 / 60.0); top = fmax(top, f->h); }
+		fprintf(stderr, "motion test: lift-off top %.2f, now %.2fx%.2f\n", top, f->w, f->h);
+		if (top > 72.5 && top < 80.0) result += 4;
+
+		// a fast drag to the right, drawn at 120 per second
+		f->dragged = YES;
+		double flattest = 1000.0, widest = 0.0;
+		for (int i = 0; i < 30; i++) {
+			f->targetX = 100.0 + 200.0 * (i + 1) / 30.0;
+			STEP(1.0 / 120.0);
+			flattest = fmin(flattest, f->h); widest = fmax(widest, f->w);
+		}
+		fprintf(stderr, "motion test: drag flattest %.2f widest %.2f at x %.2f\n", flattest, widest, f->x);
+		if (flattest < 68.0 && flattest > 54.0 && widest > 100.0 && widest < 125.0) result += 8;
+
+		// the finger rests
+		top = 0.0;
+		for (int i = 0; i < 48; i++) { STEP(1.0 / 60.0); top = fmax(top, f->h); }
+		fprintf(stderr, "motion test: after the stop top %.2f, rest %.2f,%.2fx%.2f\n", top, f->x, f->w, f->h);
+		if (top > 72.3 && fabs(f->h - 72.0) < 0.3 && fabs(f->w - 94.0) < 0.3 && fabs(f->x - 300.0) < 0.3) result += 16;
+
+		// the finger moves far above the bar
+		motionTouchBar = bar; motionTouchY = [lens center].y - 150.0; motionTouchX = 300.0; motionTouching = YES;
+		for (int i = 0; i < 40; i++) STEP(1.0 / 60.0);
+		fprintf(stderr, "motion test: pulled %.2fx%.2f\n", f->w, f->h);
+		if (f->h > 78.0 && f->h < 90.0 && f->w < 94.0) result += 32;
+		double leaned = [lens center].y;
+		fprintf(stderr, "motion test: leaned to y %.2f (bar middle 30)\n", leaned);
+		motionTouching = NO;
+
+		// the finger moves 100 pt past the last tab (the bar's only button stands at 300)
+		UIView *button = [[objc_getClass("UITabBarButton") alloc] initWithFrame:CGRectMake(260, 0, 80, 60)];
+		[bar addSubview:button];
+		motionTouchBar = bar; motionTouchY = 30.0; motionTouchX = 400.0; motionTouching = YES;
+		f->targetX = 312.4;
+		for (int i = 0; i < 40; i++) STEP(1.0 / 60.0);
+		fprintf(stderr, "motion test: reached x %.2f (last tab 300)\n", f->x);
+		if (button && fabs(f->x - 334.0) < 0.5) result += 512;
+		motionTouching = NO;
+		f->targetX = 300;
+		for (int i = 0; i < 30; i++) STEP(1.0 / 60.0);
+
+		// release after the drag: into the resting shape on the nearest tab
+		f->active = NO; f->settling = YES; f->targetX = 310; f->targetW = 78; f->targetH = 54;
+		int ticks = 0;
+		while (!f->finished && ticks < 60) { STEP(1.0 / 60.0); ticks++; }
+		fprintf(stderr, "motion test: settled after %d ticks at %.2f,%.2fx%.2f\n", ticks, f->x, f->w, f->h);
+		if (f->finished && ticks <= 30) result += 64;
+		fprintf(stderr, "motion test: after the release y %.2f\n", [lens center].y);
+		if (leaned < 30.0 - 18.0 && leaned > 30.0 - 30.5 && fabs([lens center].y - 30.0) < 1.5) result += 256;
+
+		// a tap on another tab: lift off, fly there, arrive, settle
+		f->finished = NO; f->generation = 2; f->active = YES; f->dragged = NO; f->lastDisplayTime = 0.0;
+		f->x = 310; f->w = 78; f->h = 54; f->targetX = 120; f->targetW = 94; f->targetH = 72;
+		for (int i = 0; i < 4; i++) STEP(1.0 / 60.0);
+		f->flying = YES;
+		ticks = 4;
+		while (!f->finished && ticks < 120) { STEP(1.0 / 60.0); ticks++; }
+		fprintf(stderr, "motion test: tap finished after %d ticks at %.2f,%.2fx%.2f\n", ticks, f->x, f->w, f->h);
+		if (f->finished && ticks <= 72 && fabs(f->x - 120.0) < 1.0) result += 128;
+		if (exact) result += 2;
+		return result;
+	}
 }

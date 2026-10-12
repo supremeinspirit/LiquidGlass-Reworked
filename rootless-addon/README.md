@@ -49,6 +49,13 @@ Create an empty file in `/var/jb/usr/lib/LiquidAssFix/` to turn a part off (take
 | `keep-callwave-frame` | Dynamic Island: the call's audio waves keep the dark box behind them (takes effect when InCallService next starts) |
 | `no-loupe-glass` | no glass on the text loupe (takes effect when an app is next started) |
 | `no-searchfield-glass` | no glass on search fields and Safari's address bar (takes effect when an app is next started) |
+| `searchfield-old-style` | text bars as before test32: Search Pill glass, the field's own corner radius, blur 5 (takes effect when an app is next started) |
+| `no-searchfield-motion` | the light edge of the text bars does not follow the tilt |
+| `no-tabbar-motion` | the tab bar's selection drop moves as the original moves it (takes effect when an app is next started) |
+| `no-tabbar-pull` | the drop does not get taller when the finger leaves the bar upwards or downwards |
+| `no-tabbar-lean` | the drop stays on the bar's middle line instead of leaning towards the finger |
+| `no-tabbar-reach` | past the first and last tab the drop only goes as far as the original lets it |
+| `tabbar-120hz` | trial, off unless the file exists: lets an app's own animations run at the screen's full refresh rate (sets `CADisableMinimumFrameDurationOnPhone` for the whole app; untested) |
 
 Opt-in (create the file to turn it on):
 
