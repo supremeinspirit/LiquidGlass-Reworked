@@ -76,7 +76,7 @@
 #include <ptrauth.h>
 
 #define CTLDIR "/var/jb/usr/lib/LiquidAssFix"
-#define BUILD_TAG "t30"
+#define BUILD_TAG "t34"
 #define MAX_BUTTONS 16
 #define MAX_TRIES 3
 
@@ -196,7 +196,18 @@ static void install(void) {
 // own step lands exactly on the values computed here, and its targets, its arrival checks and its hand-over to
 // the resting highlight stay as they are.
 //
+// Since t31 the drop's sizes follow reference pictures of the system's own glass tab bar: pressed and not
+// travelling it is big and nearly round (narrower and taller than the original's lifted drop, standing out of
+// the bar), a slow drag keeps that size, and the faster it travels the flatter and longer it gets; position,
+// size and lean all swing a little past their goal when they change.
+//
+// Since t33 the release ends with a small swing: on its way into the resting pill behind the selected tab the
+// shape runs a little past the pill's size and comes back, and the pill itself carries that swing on from the
+// moment the original has put it in the drop's place.
+//
 // Kill switch: create /var/jb/usr/lib/LiquidAssFix/no-tabbar-motion (the original's motion)
+// Without the swing of the resting pill after a release only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-settle-bounce
+// The drop's sizes as before t31: /var/jb/usr/lib/LiquidAssFix/tabbar-drop-old-size
 // Without the size change from the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-pull
 // Without the lean towards the finger's height only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-lean
 // Without the longer way past the first and last tab only: /var/jb/usr/lib/LiquidAssFix/no-tabbar-reach
@@ -213,6 +224,7 @@ typedef struct {
 	double lastTime;
 	unsigned long generation;
 	int valid, pending;
+	int settling;                     // the drop was on its way into the resting pill at the last tick
 	int frames;
 	double framesFrom;
 } TabMotion;
@@ -271,6 +283,19 @@ static TabMotion *motionFor(id state) {
 	return (TabMotion *)[data mutableBytes];
 }
 
+// The lifted drop against the original's (94x72 in a five-tab bar): standing still MOTION_PRESS_W wider and
+// MOTION_PRESS_H taller; at full speed another MOTION_FAST_W wider and MOTION_FAST_H flatter. From the reference
+// pictures: fast about 132x53. The pressed size was set again in t32 from a screenshot of this drop beside the
+// reference, both measured against their bar's height: the reference drop is 1.44 bar heights wide and 1.28
+// high, ours was 1.33 and 1.18 (88x78), so it is now 94x85.
+#define MOTION_PRESS_W 0.0
+#define MOTION_PRESS_H 13.0
+#define MOTION_FAST_W 38.0
+#define MOTION_FAST_H 32.0
+#define MOTION_SLOW_SPEED 45.0      // pt per second up to which the drop keeps its pressed size
+#define MOTION_FULL_SPEED 800.0
+static int motionOldSize = -1;
+
 static double motionRestY;         // the drop's centre height in the bar, as the original last placed it
 
 // height added by a finger that left the bar upwards or downwards
@@ -302,6 +327,71 @@ static double motionReach(UIView *bar, double targetX) {
 	if (motionTouchX > last) return last + fmin(3.4 * sqrt(motionTouchX - last), MOTION_REACH_MAX);
 	if (motionTouchX < first) return first - fmin(3.4 * sqrt(first - motionTouchX), MOTION_REACH_MAX);
 	return targetX;
+}
+
+// The resting pill behind the selected tab, as the original leaves it when the drop is gone: a plain rounded view
+// of the bar with the given size at the given place.
+static UIView *motionRestingPill(UIView *bar, UIView *lens, double x, double w, double h) {
+	for (UIView *view in [bar subviews]) {
+		if (view == lens || [view class] != [UIView class] || [view isHidden] || [view maskView]) continue;
+		CALayer *layer = [view layer];
+		CGRect bounds = [view bounds];
+		if (![layer masksToBounds] || ![view backgroundColor]) continue;
+		if (fabs(bounds.size.width - w) > 1.0 || fabs(bounds.size.height - h) > 1.0 || fabs([view center].x - x) > 2.0) continue;
+		if (fabs([layer cornerRadius] - h * 0.5) > 1.0) continue;
+		return view;
+	}
+	return nil;
+}
+
+// The drop's way into the resting pill: a spring that runs past the pill's size and comes back
+#define MOTION_SETTLE_RESPONSE 0.32
+#define MOTION_SETTLE_DAMPING 0.34
+static int motionNoSettleBounce = -1;
+static BOOL motionSettleLogged;
+
+// The original has just replaced the drop by the resting pill, at the pill's exact size. The drop was still
+// swinging: the pill goes on from the drop's size and speed and comes to rest (drawn by Core Animation on top of
+// the pill's own size, which stays untouched).
+static void motionSettleBounce(id state, TabMotion *m) {
+	if (motionNoSettleBounce) return;
+	UIView *lens = ((id (*)(id, SEL))objc_msgSend)(state, sel_registerName("lens"));
+	UIView *bar = ((id (*)(id, SEL))objc_msgSend)(state, sel_registerName("bar"));
+	if (!bar) return;
+	double restX = motionGet(state, "targetCenterX"), restW = motionGet(state, "targetWidth"), restH = motionGet(state, "targetHeight");
+	if (!isfinite(restX) || !isfinite(restW) || !isfinite(restH) || restW < 20.0 || restH < 20.0) return;
+	double offW = fmin(fmax(m->w - restW, -24.0), 24.0), offH = fmin(fmax(m->h - restH, -24.0), 24.0);
+	double speedW = fmin(fmax(m->vw, -900.0), 900.0), speedH = fmin(fmax(m->vh, -900.0), 900.0);
+	if (fabs(offW) < 0.3 && fabs(offH) < 0.3 && fabs(speedW) < 8.0 && fabs(speedH) < 8.0) return;
+	UIView *pill = motionRestingPill(bar, lens, restX, restW, restH);
+	if (!pill) return;
+	const int count = 48;
+	NSMutableArray *widths = [NSMutableArray arrayWithCapacity:count + 1], *heights = [NSMutableArray arrayWithCapacity:count + 1];
+	NSMutableArray *radii = [NSMutableArray arrayWithCapacity:count + 1];
+	double firstW = offW, firstH = offH;
+	for (int i = 0; i <= count; i++) {
+		double w = i == count ? 0.0 : offW, h = i == count ? 0.0 : offH;
+		[widths addObject:[NSNumber numberWithDouble:w]];
+		[heights addObject:[NSNumber numberWithDouble:h]];
+		[radii addObject:[NSNumber numberWithDouble:h * 0.5]];
+		motionSpring(&offW, &speedW, 0.0, MOTION_SETTLE_RESPONSE, MOTION_SETTLE_DAMPING, 1.0 / 60.0);
+		motionSpring(&offH, &speedH, 0.0, MOTION_SETTLE_RESPONSE, MOTION_SETTLE_DAMPING, 1.0 / 60.0);
+	}
+	static const char *paths[] = { "bounds.size.width", "bounds.size.height", "cornerRadius" };
+	static const char *keys[] = { "lgtabfixSettleWidth", "lgtabfixSettleHeight", "lgtabfixSettleRadius" };
+	NSArray *values[3];
+	values[0] = widths; values[1] = heights; values[2] = radii;
+	for (int i = 0; i < 3; i++) {
+		CAKeyframeAnimation *animation = [CAKeyframeAnimation animationWithKeyPath:[NSString stringWithUTF8String:paths[i]]];
+		[animation setValues:values[i]];
+		[animation setDuration:count / 60.0];
+		[animation setAdditive:YES];
+		[[pill layer] addAnimation:animation forKey:[NSString stringWithUTF8String:keys[i]]];
+	}
+	if (!motionSettleLogged) {
+		motionSettleLogged = YES;
+		tlog("tab bar: the resting pill swings on after the release (from %+.1f x %+.1f pt off its size; logged once)", firstW, firstH);
+	}
 }
 
 // Sets the original's numbers so that its step ends on the drop computed here. Returns NO to leave the tick alone.
@@ -342,17 +432,38 @@ static BOOL motionPrepare(id state, id link) {
 
 	double wantW = targetW, wantH = targetH;
 	double responseX = 0.22, dampingX = 1.0, responseSize = 0.20, dampingSize = 1.0;
+	if (motionNoSettleBounce < 0) motionNoSettleBounce = access(CTLDIR "/no-tabbar-settle-bounce", F_OK) == 0;
+	m->settling = settling;
+	if (settling && !motionNoSettleBounce) {
+		responseSize = MOTION_SETTLE_RESPONSE;
+		dampingSize = MOTION_SETTLE_DAMPING;
+	}
 	if (!settling) {
 		// lifted: flatter and wider with its own speed, taller with the finger's distance from the bar
-		double speed = fmin(fabs(m->vx) / 1000.0, 1.0);
-		speed = pow(speed, 0.8);
+		if (motionOldSize < 0) motionOldSize = access(CTLDIR "/tabbar-drop-old-size", F_OK) == 0;
 		double pull = motionPull(bar, lens);
-		wantW = m->baseW + 24.0 * speed - 0.35 * pull;
-		wantH = m->baseH - 14.0 * speed + pull;
-		if (flying || !dragged) { responseX = 0.26; dampingX = 0.85; }      // on its way to a tapped tab
-		else                    { responseX = 0.13; dampingX = 0.92; }      // under the finger
-		responseSize = 0.26;
-		dampingSize = 0.45;
+		if (motionOldSize) {
+			double speed = fmin(fabs(m->vx) / 1000.0, 1.0);
+			speed = pow(speed, 0.8);
+			wantW = m->baseW + 24.0 * speed - 0.35 * pull;
+			wantH = m->baseH - 14.0 * speed + pull;
+			if (flying || !dragged) { responseX = 0.26; dampingX = 0.85; }      // on its way to a tapped tab
+			else                    { responseX = 0.13; dampingX = 0.92; }      // under the finger
+			responseSize = 0.26;
+			dampingSize = 0.45;
+		} else {
+			double speed = fmin(fmax((fabs(m->vx) - MOTION_SLOW_SPEED) / (MOTION_FULL_SPEED - MOTION_SLOW_SPEED), 0.0), 1.0);
+			speed = pow(speed, 0.85);
+			// on its way to a tapped tab the drop ends in the original's own lifted size: the original waits for
+			// exactly that size before it lets the drop settle on the tab
+			double press = flying ? fmin(fabs(targetX - m->x) / 40.0, 1.0) : 1.0;
+			wantW = m->baseW + MOTION_PRESS_W * press + MOTION_FAST_W * speed - 0.35 * pull;
+			wantH = m->baseH + MOTION_PRESS_H * press - MOTION_FAST_H * speed + pull;
+			if (flying || !dragged) { responseX = 0.28; dampingX = 0.72; }      // on its way to a tapped tab
+			else                    { responseX = 0.15; dampingX = 0.78; }      // under the finger
+			responseSize = 0.28;
+			dampingSize = 0.40;
+		}
 	}
 	double goalX = !settling && !flying && active && dragged ? motionReach(bar, targetX) : targetX;
 	motionSpring(&m->x, &m->vx, goalX, responseX, dampingX, dt);
@@ -407,7 +518,8 @@ static void motionLean(id state, TabMotion *m) {
 	double want = 0.0;
 	if (!settling && !flying && motionTouching && motionTouchBar == bar)
 		want = MOTION_LEAN_MAX * tanh((motionTouchY - centre.y) / 85.0);
-	motionSpring(&m->shift, &m->vshift, want, want == 0.0 ? 0.16 : 0.20, want == 0.0 ? 1.0 : 0.75, 1.0 / 60.0);
+	if (motionOldSize > 0) motionSpring(&m->shift, &m->vshift, want, want == 0.0 ? 0.16 : 0.20, want == 0.0 ? 1.0 : 0.75, 1.0 / 60.0);
+	else motionSpring(&m->shift, &m->vshift, want, want == 0.0 ? 0.22 : 0.22, want == 0.0 ? 0.55 : 0.60, 1.0 / 60.0);
 	if (!isfinite(m->shift) || !isfinite(m->vshift)) { m->shift = m->vshift = 0.0; return; }
 	m->shift = fmin(fmax(m->shift, -MOTION_LEAN_MAX - 4.0), MOTION_LEAN_MAX + 4.0);
 	if (fabs(m->shift) < 0.05) return;
@@ -432,6 +544,10 @@ static void motionTick(id self, SEL _cmd, id link) {
 		m->outX = motionGet(self, "renderedCenterX");
 		m->outW = motionGet(self, "renderedWidth");
 		m->outH = motionGet(self, "renderedHeight");
+		if (m->settling && !motionFlag(self, "awaitingRestingShape")) {
+			m->settling = 0;
+			motionSettleBounce(self, m);
+		}
 		motionLean(self, m);
 		if (!motionLogged) {
 			motionLogged = YES;
@@ -2111,7 +2227,8 @@ static void fakeTick(id self, SEL _cmd, id link) {
 // target, 32 a finger far above the bar makes it taller, 64 a release settles into the resting shape within half
 // a second, 128 a tap flies to the tab, arrives and settles within 1.2 s, 256 the finger far above the bar leans
 // the drop upwards by less than 30.5 pt and it is back on the middle line after the release, 512 a finger 100 pt
-// past the last tab pulls the drop 34 pt past it.
+// past the last tab pulls the drop 34 pt past it, 1024 on a release the shape gets 3 to 13 pt flatter than the
+// resting pill, and the pill then carries an additive swing that starts at the drop's last size and ends at 0.
 int lgtabfix_motiontest(const char *arg) {
 	(void)arg;
 	@autoreleasepool {
@@ -2170,7 +2287,7 @@ int lgtabfix_motiontest(const char *arg) {
 		double top = 0.0;
 		for (int i = 0; i < 24; i++) { STEP(1.0 / 60.0); top = fmax(top, f->h); }
 		fprintf(stderr, "motion test: lift-off top %.2f, now %.2fx%.2f\n", top, f->w, f->h);
-		if (top > 72.5 && top < 80.0) result += 4;
+		if (top > 85.5 && top < 99.0 && fabs(f->h - 85.0) < 1.5 && fabs(f->w - 94.0) < 1.5) result += 4;
 
 		// a fast drag to the right, drawn at 120 per second
 		f->dragged = YES;
@@ -2181,19 +2298,19 @@ int lgtabfix_motiontest(const char *arg) {
 			flattest = fmin(flattest, f->h); widest = fmax(widest, f->w);
 		}
 		fprintf(stderr, "motion test: drag flattest %.2f widest %.2f at x %.2f\n", flattest, widest, f->x);
-		if (flattest < 68.0 && flattest > 54.0 && widest > 100.0 && widest < 125.0) result += 8;
+		if (flattest < 58.0 && flattest > 46.0 && widest > 120.0 && widest < 142.0) result += 8;
 
 		// the finger rests
 		top = 0.0;
 		for (int i = 0; i < 48; i++) { STEP(1.0 / 60.0); top = fmax(top, f->h); }
 		fprintf(stderr, "motion test: after the stop top %.2f, rest %.2f,%.2fx%.2f\n", top, f->x, f->w, f->h);
-		if (top > 72.3 && fabs(f->h - 72.0) < 0.3 && fabs(f->w - 94.0) < 0.3 && fabs(f->x - 300.0) < 0.3) result += 16;
+		if (top > 85.3 && fabs(f->h - 85.0) < 0.6 && fabs(f->w - 94.0) < 0.6 && fabs(f->x - 300.0) < 0.5) result += 16;
 
 		// the finger moves far above the bar
 		motionTouchBar = bar; motionTouchY = [lens center].y - 150.0; motionTouchX = 300.0; motionTouching = YES;
 		for (int i = 0; i < 40; i++) STEP(1.0 / 60.0);
 		fprintf(stderr, "motion test: pulled %.2fx%.2f\n", f->w, f->h);
-		if (f->h > 78.0 && f->h < 90.0 && f->w < 94.0) result += 32;
+		if (f->h > 91.0 && f->h < 103.0 && f->w < 94.0) result += 32;
 		double leaned = [lens center].y;
 		fprintf(stderr, "motion test: leaned to y %.2f (bar middle 30)\n", leaned);
 		motionTouching = NO;
@@ -2211,9 +2328,27 @@ int lgtabfix_motiontest(const char *arg) {
 		for (int i = 0; i < 30; i++) STEP(1.0 / 60.0);
 
 		// release after the drag: into the resting shape on the nearest tab
+		UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 78, 54)];
+		[pill setCenter:CGPointMake(310, 30)];
+		[pill setBackgroundColor:[UIColor colorWithWhite:1.0 alpha:0.1]];
+		[[pill layer] setMasksToBounds:YES];
+		[[pill layer] setCornerRadius:27.0];
+		[bar addSubview:pill];
 		f->active = NO; f->settling = YES; f->targetX = 310; f->targetW = 78; f->targetH = 54;
 		int ticks = 0;
-		while (!f->finished && ticks < 60) { STEP(1.0 / 60.0); ticks++; }
+		double smallest = 1000.0;
+		while (!f->finished && ticks < 60) { STEP(1.0 / 60.0); ticks++; smallest = fmin(smallest, f->h); }
+		{
+			TabMotion *mm = motionFor(state);
+			CAKeyframeAnimation *swing = (CAKeyframeAnimation *)[[pill layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixSettleHeight"]];
+			NSArray *swingValues = swing ? [swing values] : nil;
+			double first = [swingValues count] ? [[swingValues objectAtIndex:0] doubleValue] : 1000.0, deepest = 0.0, highest = 0.0;
+			for (NSNumber *value in swingValues) { deepest = fmin(deepest, [value doubleValue]); highest = fmax(highest, [value doubleValue]); }
+			fprintf(stderr, "motion test: release flattest %.2f (pill 54), pill swing starts at %+.2f, goes from %+.2f to %+.2f, ends at %+.2f over %lu steps\n",
+				smallest, first, deepest, highest, [swingValues count] ? [[swingValues lastObject] doubleValue] : 1000.0, (unsigned long)[swingValues count]);
+			if (swing && [swing isAdditive] && fabs(first - (mm->h - 54.0)) < 1e-6 && fmin(deepest, smallest - 54.0) < -3.0 && fmin(deepest, smallest - 54.0) > -13.0 && highest < 6.0
+				&& [[swingValues lastObject] doubleValue] == 0.0 && [[pill layer] animationForKey:[NSString stringWithUTF8String:"lgtabfixSettleWidth"]]) result += 1024;
+		}
 		fprintf(stderr, "motion test: settled after %d ticks at %.2f,%.2fx%.2f\n", ticks, f->x, f->w, f->h);
 		if (f->finished && ticks <= 30) result += 64;
 		fprintf(stderr, "motion test: after the release y %.2f\n", [lens center].y);

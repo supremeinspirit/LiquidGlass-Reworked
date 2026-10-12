@@ -32,7 +32,7 @@ Only these devices. Everything else is untested.
 
 | Variant | Device | iOS | Jailbreak | Status |
 | --- | --- | --- | --- | --- |
-| rootful iOS 13 port | iPhone X (iPhone10,6) | 13.3 (17C54) | unc0ver, rootful, Substitute | tested on device |
+| rootful iOS 13 port | iPhone X (iPhone10,6) | 13.3 (17C54) | unc0ver, rootful, Substitute | tested on device up to ios13.17 / ios13.18; **ios13.19 (slider glyph colours, tab bar motion) was published untested** |
 | rootless | iPhone 15 Pro Max (iPhone16,2) | 17.3 (21D50) | Dopamine 3.0.10, rootless, ElleKit 1.2 | tested on device |
 | rootless | iPhone 12 (iPhone13,2) | 15.2.1 (19C63) | Dopamine 3.0.9, rootless, ElleKit 1.2 | tested on device (Control Center fixes; the other fixes are iOS 17 only) |
 
@@ -83,6 +83,10 @@ New in test29 (rootless, iOS 17): Control Center sliders. While a slider module 
 New in test32 (rootless): **text bars** (search fields, Safari's address bar) are drawn with the glass and the full pill shape of the Spotlight Search Bar instead of the Search Pill glass, and their light edge follows the phone's tilt when Specular Motion is on (the original only does that inside SpringBoard). The **selection drop of the floating tab bar** moves as a spring instead of a fixed fraction per frame: it gets flatter and wider with its speed, swings past its size when it lifts off and when it stops, leans towards the finger's height and follows the finger further past the first and last tab.
 
 New in test33 (rootless): the **light edge of the floating tab bar** follows the phone's tilt in apps as well when Specular Motion is on, by the same timer as the text bars (switch off by file: `/var/jb/usr/lib/LiquidAssFix/no-tabbar-specular-motion`).
+
+New in test37 (rootless): the tab bar's selection drop has the **sizes of the system's own glass tab bar** (big and nearly round while pressed and on a slow drag, flatter and longer the faster it travels; the sizes before with the file `/var/jb/usr/lib/LiquidAssFix/tabbar-drop-old-size`), and after a release the **resting pill behind the selected tab arrives with a springy swing** (`/var/jb/usr/lib/LiquidAssFix/no-tabbar-settle-bounce`).
+
+New in the rootful iOS 13 port `1:0.1.1-2b+ios13.19`: the **coloured Control Center slider glyphs** (yellow sun, blue speaker; `Hooks/ControlCenterSliderGlyphs.x`, off with the hidden setting `ControlCenter.SliderGlyphColors` = false) and the **tab bar selection motion** of the rootless patch as of test37 (`Hooks/TabBarMotion.x`; its switch files are looked for in `/usr/lib/LiquidAssFix/`). This build was published without having been run on a device.
 
 ---
 
