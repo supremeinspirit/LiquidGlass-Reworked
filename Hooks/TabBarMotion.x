@@ -1,5 +1,5 @@
 // Tab bar selection motion for the rootful build: the same code as the rootless add-on's (rootless-addon/lgtabfix.m,
-// section "tab bar selection motion", state of Reworked v3 test38), compiled into the tweak itself. It changes the
+// section "tab bar selection motion", state of Reworked v3 test41), compiled into the tweak itself. It changes the
 // drop that Hooks/TabBar.x draws (LGTabBarMotionState) at run time, exactly as the add-on does to the original.
 // Kept as its own file so that both builds share one text; change it there first and copy the section over.
 // The switch files below are looked for in /usr/lib/LiquidAssFix on a rootful phone.
@@ -72,6 +72,11 @@ static void tlog(const char *fmt, ...) {
 // by 3.5 % while a tab is held and lets it glide back in 0.26 s; now it runs a little below its size and comes
 // back. Without that only: /usr/lib/LiquidAssFix/no-tabbar-release-bounce
 // The drop's sizes as before t31: /usr/lib/LiquidAssFix/tabbar-drop-old-size
+//
+// Since t36 the drop keeps its size while it slides under the finger: the size goes by the speed evened out over
+// about a twentieth of a second and only follows once that speed has really changed, and its spring swings less, so
+// it swings when the size changes and stands still otherwise. As before (the size follows every change of the
+// speed at once): /usr/lib/LiquidAssFix/tabbar-drop-live-size
 // Without the size change from the finger's height only: /usr/lib/LiquidAssFix/no-tabbar-pull
 // Without the lean towards the finger's height only: /usr/lib/LiquidAssFix/no-tabbar-lean
 // Without the longer way past the first and last tab only: /usr/lib/LiquidAssFix/no-tabbar-reach
@@ -91,6 +96,7 @@ typedef struct {
 	int settling;                     // the drop was on its way into the resting pill at the last tick
 	int frames;
 	double framesFrom;
+	double pace, paceHeld;            // the speed the size goes by under the finger: evened out, and as last taken
 } TabMotion;
 
 static IMP origMotionTick, origMotionStart;
@@ -152,13 +158,29 @@ static TabMotion *motionFor(id state) {
 // pictures: fast about 132x53. The pressed size was set again in t32 from a screenshot of this drop beside the
 // reference, both measured against their bar's height: the reference drop is 1.44 bar heights wide and 1.28
 // high, ours was 1.33 and 1.18 (88x78), so it is now 94x85.
+// Since t38 the held and slowly dragged drop is taller only (94x92, was 94x85), and the fast one flatter (about
+// 132x46, was 132x53).
 #define MOTION_PRESS_W 0.0
-#define MOTION_PRESS_H 13.0
+#define MOTION_PRESS_H 20.0
 #define MOTION_FAST_W 38.0
-#define MOTION_FAST_H 32.0
+#define MOTION_FAST_H 46.0
 #define MOTION_SLOW_SPEED 45.0      // pt per second up to which the drop keeps its pressed size
 #define MOTION_FULL_SPEED 800.0
-static int motionOldSize = -1;
+#define MOTION_PACE_TIME 0.05       // seconds over which the speed is evened out before the size goes by it
+#define MOTION_PACE_HOLD 0.18       // part of the speed range the evened speed may wander without a new size
+#define MOTION_STEADY_DAMPING 0.50  // the size spring under the finger (0.40 before t36)
+static int motionOldSize = -1, motionLiveSize = -1;
+
+// The speed (0 to 1) the drop's size goes by while it slides under the finger: evened out, and held until it has
+// moved away from the last one taken by more than the hold, which gets smaller towards standing still and full
+// speed so that both ends are still reached.
+static double motionPace(TabMotion *m, double speed, double dt) {
+	m->pace += (speed - m->pace) * (1.0 - exp(-dt / MOTION_PACE_TIME));
+	double hold = MOTION_PACE_HOLD * fmin(fmin(m->pace, 1.0 - m->pace) / 0.25, 1.0);
+	if (hold < 0.0) hold = 0.0;
+	m->paceHeld = fmin(fmax(m->paceHeld, m->pace - hold), m->pace + hold);
+	return m->paceHeld;
+}
 
 static double motionRestY;         // the drop's centre height in the bar, as the original last placed it
 
@@ -282,6 +304,7 @@ static BOOL motionPrepare(id state, id link) {
 		m->x = renderedX; m->w = renderedW; m->h = renderedH;
 		m->vx = m->vw = m->vh = 0.0;
 		if (fresh) m->shift = m->vshift = 0.0;
+		if (fresh) m->pace = m->paceHeld = 0.0;
 		if (fresh && !settling && targetW >= 40.0 && targetW <= 220.0 && targetH >= 30.0 && targetH <= 140.0) {
 			m->baseW = targetW;
 			m->baseH = targetH;
@@ -318,6 +341,12 @@ static BOOL motionPrepare(id state, id link) {
 		} else {
 			double speed = fmin(fmax((fabs(m->vx) - MOTION_SLOW_SPEED) / (MOTION_FULL_SPEED - MOTION_SLOW_SPEED), 0.0), 1.0);
 			speed = pow(speed, 0.85);
+			if (motionLiveSize < 0) motionLiveSize = access(CTLDIR "/tabbar-drop-live-size", F_OK) == 0;
+			// under the finger the size keeps still while the speed only wavers; a flying drop goes by its speed
+			// as it is (the original waits for its exact size at the end)
+			BOOL steady = !motionLiveSize && !flying && dragged;
+			if (steady) speed = motionPace(m, speed, dt);
+			else m->pace = m->paceHeld = speed;
 			// on its way to a tapped tab the drop ends in the original's own lifted size: the original waits for
 			// exactly that size before it lets the drop settle on the tab
 			double press = flying ? fmin(fabs(targetX - m->x) / 40.0, 1.0) : 1.0;
@@ -326,7 +355,7 @@ static BOOL motionPrepare(id state, id link) {
 			if (flying || !dragged) { responseX = 0.28; dampingX = 0.72; }      // on its way to a tapped tab
 			else                    { responseX = 0.15; dampingX = 0.78; }      // under the finger
 			responseSize = 0.28;
-			dampingSize = 0.40;
+			dampingSize = steady ? MOTION_STEADY_DAMPING : 0.40;
 		}
 	}
 	double goalX = !settling && !flying && active && dragged ? motionReach(bar, targetX) : targetX;
@@ -613,7 +642,6 @@ static void installMotionTouches(void) {
 		} @catch (id e) {}
 	}
 }
-
 // The touch hooks go on when the tweak is loaded into a process with UIKit's tab bar; they do nothing until the
 // drop of Hooks/TabBar.x moves.
 __attribute__((constructor)) static void LGTabBarMotionLoad(void) {
